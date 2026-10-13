@@ -4,10 +4,13 @@ import datetime
 import getpass
 import io
 import os
+import socket
 import sys
+import threading
 
 import requests
 from flask import Flask, Response, g, jsonify, request, send_from_directory
+from werkzeug.serving import make_server
 
 import db
 import pce as pcelib
@@ -998,5 +1001,37 @@ with app.test_request_context():
     con().commit()
 
 
+def listen_hosts():
+    """Addresses to serve on: localhost plus the address of this machine's hostname."""
+    hosts = ["127.0.0.1"]
+    try:
+        addr = socket.gethostbyname(socket.gethostname())
+    except OSError:
+        addr = ""
+    if not addr or addr.startswith("127."):
+        # Debian-style /etc/hosts maps the hostname to 127.0.1.1; use the primary interface instead.
+        # Connecting a UDP socket only picks a route, it sends nothing.
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect(("192.0.2.1", 9))
+                addr = probe.getsockname()[0]
+        except OSError:
+            addr = ""
+    if addr and not addr.startswith("127."):
+        hosts.append(addr)
+    return hosts
+
+
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=int(os.environ.get("PORT", 5055)), debug=False)
+    port = int(os.environ.get("PORT", 5055))
+    servers = [make_server(host, port, app, threaded=True) for host in listen_hosts()]
+    if len(servers) == 1:
+        print(" * Hostname address not found, serving on localhost only", flush=True)
+    for server in servers:
+        print(f" * Running on http://{server.host}:{port}", flush=True)
+    for server in servers[1:]:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        servers[0].serve_forever()
+    except KeyboardInterrupt:
+        pass

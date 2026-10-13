@@ -8,9 +8,14 @@ comments — is tracked locally.
 ## Run
 
 ```bash
-pip3 install -r requirements.txt
-python3 app.py            # http://127.0.0.1:5055  (PORT=xxxx to change)
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python3 app.py            # http://127.0.0.1:5055 and http://<hostname>:5055  (PORT=xxxx to change)
 ```
+
+Run `source .venv/bin/activate` again in each new shell before starting the app; without it
+`python3 app.py` fails with `ModuleNotFoundError: No module named 'flask'`.
 
 Open the app and press **Sync from PCE**. The PCE connection is read from `config.yaml`
 and can be edited under **Settings → PCE Configuration**.
@@ -220,7 +225,9 @@ Conventions (see `db.py`):
 
 ## Security notes
 
-- The server binds to `127.0.0.1` only and has no login; put it behind an authenticating proxy before exposing it.
+- The server listens on `127.0.0.1` and on the address of the machine's hostname, and has no login: anyone who can
+  reach that address on the network can read and change the tracker and its PCE settings. Restrict the port with a
+  firewall or put the app behind an authenticating proxy.
 - Write requests require a custom header, so other websites open in the same browser cannot call the API.
 - API secrets stay in `config.yaml` (mode `600`) and are never returned to the browser.
 - `config.yaml` and `tracker.db` are listed in `.gitignore`.
