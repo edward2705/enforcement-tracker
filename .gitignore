@@ -1,0 +1,6 @@
+config.yaml
+tracker.db
+__pycache__/
+*.pyc
+*.bak
+.venv/

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Illumio Enforcement Tracker</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c1728'/%3E%3Cpath d='M8 8h6v3h-3v10h3v3H8zM24 8h-6v3h3v10h-3v3h6z' fill='%23f26b21'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/vendor/bootstrap.min.css">
+  <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.min.css">
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script>
+    // Apply the saved theme before first paint.
+    try {
+      var t = localStorage.getItem('tracker-theme') ||
+        (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-bs-theme', t);
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <div id="root">
+    <div class="boot">
+      <div class="spinner-border text-primary" role="status"></div>
+      <div class="boot-text">Loading Illumio Enforcement Tracker…</div>
+    </div>
+  </div>
+
+  <script src="/static/vendor/react.min.js"></script>
+  <script src="/static/vendor/react-dom.min.js"></script>
+  <script src="/static/vendor/babel.min.js"></script>
+  <script>
+    // The TypeScript/React sources are compiled in the browser by Babel, so there is
+    // no Node.js build step. Files share one scope and are loaded in this order.
+    (async function () {
+      var files = ['core', 'ui', 'table', 'modals', 'pages', 'timeline', 'reports', 'ven', 'main'];
+      try {
+        var parts = await Promise.all(files.map(function (f) {
+          return fetch('/static/app/' + f + '.tsx', { cache: 'no-cache' }).then(function (r) {
+            if (!r.ok) throw new Error('Could not load ' + f + '.tsx');
+            return r.text();
+          });
+        }));
+        var out = Babel.transform(parts.join('\n'), {
+          filename: 'app.tsx',
+          sourceType: 'script',
+          presets: [['react', { runtime: 'classic' }], ['typescript', { isTSX: true, allExtensions: true }]]
+        }).code;
+        var s = document.createElement('script');
+        s.textContent = out;
+        document.body.appendChild(s);
+      } catch (err) {
+        var box = document.createElement('pre');
+        box.className = 'boot-error';
+        box.textContent = 'Failed to start the app:\n\n' + (err && err.message ? err.message : err);
+        var root = document.getElementById('root');
+        root.textContent = '';
+        root.appendChild(box);
+      }
+    })();
+  </script>
+</body>
+</html>
