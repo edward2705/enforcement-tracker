@@ -166,7 +166,7 @@ the tracker's own mark. The cover page is white with the logo and accents in Ill
   unmanaged workloads, labelling, unused labels, policy provisioning and coverage,
   project plan, VEN type) rated Critical, Action, Attention or Good with a recommendation. The
   ratings are fixed rules in `assess()` in `reports.py`, not a manual review.
-- **6. Recommendations** - what the consultant entered on the Reports tab, or the empty form, and a sign-off table.
+- **6. Recommendations** - what the consultant entered on the Reports tab, or the empty form.
   **Saved Recommendations** on that tab saves the whole form (engagement details, recommended actions, risks,
   next steps, notes) under a name, per PCE, in `consultant_report_saves`; **Retrieve** puts a saved copy back in the
   form (and so in the report), **Update** overwrites it with the form, and saving under an existing name replaces it.

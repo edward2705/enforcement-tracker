@@ -1837,14 +1837,6 @@ def build_docx(data, preview=False):
               filled=[[r["action"], r["owner"], fmt_date(r["due_date"]) if r["due_date"] else "", r["notes"]] for r in consultant["next_steps"]])
     doc.add_heading("Additional Notes", level=2)
     form_box(doc, 1.1, consultant["notes"])
-    doc.add_heading("Sign-off", level=2)
-    form_grid(doc, ["Role", "Name", "Signature", "Date"], [2.2, 3.0, 3.0, 1.6], blank_rows=3, height=0.5, numbered=False)
-    for row, (role, name) in zip(doc.tables[-1].rows[1:], (("Prepared by (Consultant)", consultant["consultant"]), ("Reviewed by", ""),
-                                                           ("Accepted by (Customer)", ""))):
-        for cell, text, bold in ((row.cells[0], role, True), (row.cells[1], name, False)):
-            run = cell.paragraphs[0].add_run(text)
-            run.font.size = Pt(9)
-            run.bold = bold
 
     doc_front(doc, [[("PCE", data["pce"]), ("Address", address), ("PCE version", pce.get("version") or "")],
                     [("Project", projects), ("Data as of", synced_text), ("Report date", datetime.date.today().strftime("%b %-d, %Y"))],
