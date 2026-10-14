@@ -1687,7 +1687,9 @@ def build_docx(data, preview=False):
                 mine = [w for w in items if w["managed"]]
                 up = sum(1 for w in mine if w["online"] and w["ven_status"] != "suspended")
                 rows.append([name or blank]
-                            + ([", ".join(sorted({w["environment"] for w in items if w["environment"]}))] if by_app else [])
+                            + ([", ".join(sorted({w["environment"] for w in items if w["environment"]})
+                                          + (["(no environment label)"] if any(not w["environment"] for w in items) else []))]
+                               if by_app else [])
                             + [len(items), len(mine), len(items) - len(mine), up, len(mine) - up]
                             + [sum(1 for w in mine if w["enforcement_mode"] == m) for m in MODE_NAMES]
                             + ([", ".join(sorted({w["ven_version"] for w in mine if w["ven_version"]}, key=version_key, reverse=True))] if by_app else []))
@@ -1891,6 +1893,81 @@ def consultant_put():
         (pid, json.dumps(content), core.now()))
     core.con().commit()
     return jsonify(load_consultant(pid))
+
+
+def saved_summary(row):
+    try:
+        content = clean_consultant(json.loads(row["content"]))
+    except ValueError:
+        content = clean_consultant({})
+    return {"id": row["id"], "name": row["name"], "saved_at": row["saved_at"], "saved_by": row["saved_by"],
+            "customer": content["customer"], "recommendations": len(content["recommendations"]),
+            "risks": len(content["risks"]), "next_steps": len(content["next_steps"])}
+
+
+def saved_row(pid, save_id):
+    row = core.con().execute("SELECT * FROM consultant_report_saves WHERE id = ? AND pce_id = ?", (save_id, pid)).fetchone()
+    if row is None:
+        raise core.ApiError("Saved recommendations not found", 404)
+    return row
+
+
+def active_pid():
+    _cfg, name = core.active_pce_name()
+    if not name:
+        raise core.ApiError("No PCE is configured - add one in Settings")
+    return core.pce_id_for(name, create=True)
+
+
+@bp.get("/api/reports/consultant/saved")
+def consultant_saved_list():
+    """Named copies of the recommendations for this PCE, newest first."""
+    _cfg, name = core.active_pce_name()
+    pid = core.pce_id_for(name) if name else None
+    rows = core.con().execute("SELECT * FROM consultant_report_saves WHERE pce_id = ? ORDER BY saved_at DESC, id DESC",
+                              (pid,)).fetchall() if pid else []
+    return jsonify(saved=[saved_summary(r) for r in rows])
+
+
+@bp.post("/api/reports/consultant/saved")
+def consultant_save():
+    """Save the given recommendations (the form as it is now) under a name; the same name is overwritten."""
+    pid = active_pid()
+    body = request.get_json(silent=True) or {}
+    label = str(body.get("name") or "").strip()[:100]
+    if not label:
+        raise core.ApiError("Give the saved recommendations a name")
+    content = clean_consultant(body.get("content"))
+    c = core.con()
+    c.execute("INSERT INTO consultant_report_saves (pce_id, name, content, saved_at, saved_by) VALUES (?,?,?,?,?) "
+              "ON CONFLICT(pce_id, name) DO UPDATE SET content = excluded.content, saved_at = excluded.saved_at, "
+              "saved_by = excluded.saved_by", (pid, label, json.dumps(content), core.now(), core.current_user()))
+    c.commit()
+    row = c.execute("SELECT * FROM consultant_report_saves WHERE pce_id = ? AND name = ?", (pid, label)).fetchone()
+    return jsonify(saved_summary(row))
+
+
+@bp.post("/api/reports/consultant/saved/<int:save_id>/load")
+def consultant_load(save_id):
+    """Retrieve saved recommendations: they replace the ones being edited (and printed in the report)."""
+    pid = active_pid()
+    row = saved_row(pid, save_id)
+    content = clean_consultant(json.loads(row["content"]))
+    core.con().execute(
+        "INSERT INTO consultant_reports (pce_id, content, updated_at) VALUES (?,?,?) "
+        "ON CONFLICT(pce_id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at",
+        (pid, json.dumps(content), core.now()))
+    core.con().commit()
+    return jsonify(load_consultant(pid))
+
+
+@bp.delete("/api/reports/consultant/saved/<int:save_id>")
+def consultant_saved_delete(save_id):
+    pid = active_pid()
+    saved_row(pid, save_id)
+    core.con().execute("DELETE FROM consultant_report_saves WHERE id = ?", (save_id,))
+    core.con().commit()
+    return jsonify(ok=True)
 
 
 def report_data():

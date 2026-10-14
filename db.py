@@ -296,6 +296,15 @@ CREATE TABLE IF NOT EXISTS consultant_reports (  -- what the consultant writes f
     content    TEXT    NOT NULL,   -- JSON: engagement details, recommendations, risks, next steps, notes
     updated_at TEXT    NOT NULL
 );
+CREATE TABLE IF NOT EXISTS consultant_report_saves (  -- named copies of the consultant's recommendations, to retrieve later
+    id         INTEGER PRIMARY KEY,
+    pce_id     INTEGER NOT NULL REFERENCES pces(id) ON DELETE CASCADE,
+    name       TEXT    NOT NULL COLLATE NOCASE,
+    content    TEXT    NOT NULL,   -- JSON, the same shape as consultant_reports.content
+    saved_at   TEXT    NOT NULL,
+    saved_by   TEXT    NOT NULL DEFAULT '',
+    UNIQUE (pce_id, name)
+);
 CREATE TABLE IF NOT EXISTS sync_runs (
     id                INTEGER PRIMARY KEY,
     pce_id            INTEGER NOT NULL REFERENCES pces(id) ON DELETE CASCADE,

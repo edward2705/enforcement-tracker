@@ -764,3 +764,11 @@ body.no-scroll { overflow: hidden; }
 .sp-step.error .sp-detail { color: var(--danger); }
 .sp-time { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; min-width: 32px; text-align: right; }
 @media (prefers-reduced-motion: reduce) { .sp-fill.live { animation: none; } .sp-fill { transition: none; } }
+
+/* Saved recommendations on Reports > Illumio Enforcement Summary Report */
+.cr-saved { background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.cr-save { display: flex; align-items: center; gap: 8px; margin: 6px 0 10px; max-width: 520px; }
+.cr-save .form-control { height: 31px; min-height: 0; padding: 4px 8px; }
+.cr-save .btn { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; height: 31px; white-space: nowrap; padding: 4px 12px; }
+.cr-saved-table { margin: 0; font-size: 13px; }
+.cr-saved-table th { font-size: 12px; color: var(--ink-3); font-weight: 600; }

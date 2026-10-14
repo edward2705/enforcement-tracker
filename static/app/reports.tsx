@@ -404,6 +404,89 @@ function RowsEditor({ title, hint, columns, rows, addLabel, onChange }: {
   );
 }
 
+interface SavedRecs { id: number; name: string; saved_at: string; saved_by: string; customer: string;
+  recommendations: number; risks: number; next_steps: number }
+
+// Named copies of the recommendations: save the form under a name, retrieve it later (it replaces the form).
+function SavedRecommendations({ current, flush, onLoaded }: { current: () => any; flush: () => Promise<boolean>; onLoaded: (form: any) => void }) {
+  const { toast } = useStore();
+  const [list, setList] = useState(null as SavedRecs[] | null);
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const refresh = () => api('GET', '/api/reports/consultant/saved').then((r: any) => setList(r.saved)).catch((e: any) => toast(e.message, 'err'));
+  useEffect(() => { refresh(); }, []);
+
+  const save = async (label: string) => {
+    label = label.trim();
+    if (!label) { toast('Give the saved recommendations a name', 'err'); return; }
+    if ((list || []).some(s => s.name.toLowerCase() === label.toLowerCase()) && !window.confirm(`Replace the saved recommendations "${label}"?`)) return;
+    setBusy(true);
+    try {
+      await flush();
+      await api('POST', '/api/reports/consultant/saved', { name: label, content: current() });
+      setName('');
+      await refresh();
+      toast(`Saved as "${label}"`);
+    } catch (e: any) { toast(e.message, 'err'); }
+    setBusy(false);
+  };
+  const load = async (s: SavedRecs) => {
+    if (!window.confirm(`Retrieve "${s.name}"? It replaces the recommendations on this page. Save them first if you want to keep them.`)) return;
+    setBusy(true);
+    try {
+      await flush();
+      onLoaded(await api('POST', `/api/reports/consultant/saved/${s.id}/load`, {}));
+      toast(`Retrieved "${s.name}"`);
+    } catch (e: any) { toast(e.message, 'err'); }
+    setBusy(false);
+  };
+  const remove = async (s: SavedRecs) => {
+    if (!window.confirm(`Delete the saved recommendations "${s.name}"? This cannot be undone.`)) return;
+    try { await api('DELETE', `/api/reports/consultant/saved/${s.id}`); await refresh(); toast(`Deleted "${s.name}"`); }
+    catch (e: any) { toast(e.message, 'err'); }
+  };
+
+  return (
+    <div className="cr-block cr-saved">
+      <div className="cr-head"><h3>Saved Recommendations</h3>
+        <span className="hint">Save the recommendations below under a name, and retrieve them later to reuse or update them</span></div>
+      <form className="cr-save" onSubmit={(e: any) => { e.preventDefault(); save(name); }}>
+        <label htmlFor="cr-save-name" className="visually-hidden">Name</label>
+        <input id="cr-save-name" className="form-control form-control-sm" maxLength={100} placeholder="Name, e.g. Q4 review - Acme"
+          value={name} onChange={(e: any) => setName(e.target.value)} />
+        <button type="submit" className="btn btn-primary btn-sm" disabled={busy}><Icon name="bi-save" /> Save</button>
+      </form>
+      {list === null ? <div className="muted">Loading…</div> : list.length === 0 ? <div className="muted">Nothing saved yet.</div> : (
+        <div className="table-responsive">
+          <table className="table table-sm align-middle cr-saved-table">
+            <thead><tr><th>Name</th><th>Customer</th><th className="text-end">Recommendations</th><th className="text-end">Risks</th>
+              <th className="text-end">Next Steps</th><th>Saved</th><th aria-label="Actions" /></tr></thead>
+            <tbody>
+              {list.map(s => (
+                <tr key={s.id}>
+                  <td><b>{s.name}</b></td>
+                  <td>{s.customer || <span className="muted">—</span>}</td>
+                  <td className="text-end">{s.recommendations}</td>
+                  <td className="text-end">{s.risks}</td>
+                  <td className="text-end">{s.next_steps}</td>
+                  <td className="text-nowrap">{fmtDateTime(s.saved_at)}{s.saved_by ? <span className="muted"> · {s.saved_by}</span> : null}</td>
+                  <td className="text-end text-nowrap">
+                    <button className="btn btn-light btn-sm" disabled={busy} onClick={() => load(s)} title="Retrieve: replace the recommendations on this page">
+                      <Icon name="bi-box-arrow-in-down" /> Retrieve</button>{' '}
+                    <button className="btn btn-light btn-sm" disabled={busy} onClick={() => save(s.name)} title="Overwrite with the recommendations on this page">
+                      <Icon name="bi-arrow-repeat" /> Update</button>{' '}
+                    <button className="btn btn-light btn-sm" onClick={() => remove(s)} aria-label={`Delete ${s.name}`} title="Delete"><Icon name="bi-trash" /></button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SummaryReport() {
   const { data, toast } = useStore();
   const [form, setForm] = useState(null as any);
@@ -497,6 +580,8 @@ function SummaryReport() {
         </div>
         {!form ? <div className="boot" style={{ height: 160 }}><div className="spinner-border text-primary" role="status" /></div> : (
           <div className="bd">
+            <SavedRecommendations current={() => latest.current} flush={push}
+              onLoaded={(r: any) => { clearTimeout(timer.current); dirty.current = false; latest.current = r; setForm(r); setState('saved'); }} />
             <div className="cr-block">
               <div className="cr-head"><h3>Engagement Details</h3><span className="hint">Customer and Consultant also appear on the cover page</span></div>
               <div className="cr-fields">
