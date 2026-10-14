@@ -1,5 +1,11 @@
 config.yaml
-tracker.db
+# SQLite databases, their journals and backups are never committed
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 __pycache__/
 *.pyc
 *.bak
