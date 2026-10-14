@@ -955,14 +955,13 @@ def logo_png(color=ORANGE):
 
 
 BLACK = "#000000"
-# Cover page colours: Illumio orange, white for the large type, black for the small type (white is
-# too faint on orange at small sizes) and for the accents.
-COVER = {"page": ORANGE, "accent": BLACK, "title": "#FFFFFF", "text": BLACK, "label": "#4A1D05", "empty": "#B4470F", "line": "#D9571A"}
+# Cover page colours: a white page with the logo, wordmark and accents in Illumio orange and the type in navy.
+COVER = {"page": "#FFFFFF", "accent": ORANGE, "brand": ORANGE, "title": NAVY, "text": NAVY, "label": MUTED, "empty": "#B6BEC9", "line": LINE}
 
 
 def cover_background(width, height):
-    """The cover page backdrop as a PNG the size of the page: orange, with a black bar down the left
-    edge and a black line along the bottom. Both accents sit in the page margins, clear of the text."""
+    """The cover page backdrop as a PNG the size of the page: the page colour, with an accent bar down
+    the left edge and an accent line along the bottom. Both sit in the page margins, clear of the text."""
     fig = Figure(figsize=(width, height), dpi=110)
     FigureCanvasAgg(fig)
     ax = fig.add_axes([0, 0, 1, 1])
@@ -1182,11 +1181,11 @@ def doc_front(doc, details):
     first, mark = body[0], len(body) - 1   # new elements are added just before the closing section properties
     headings = [(p.style.name, p.text) for p in doc.paragraphs if p.style.name in ("Heading 1", "Heading 2")]
 
-    # ---- cover: white and black on Illumio orange. The orange comes twice: a full-page picture
-    # behind the text (so the page is orange edge to edge) and orange cells (so the text stays
-    # readable in viewers that do not draw that picture).
+    # ---- cover, in the COVER colours. The page colour comes twice: a full-page picture behind the
+    # text (edge to edge, with the accent bars) and the fill of the cells (so the text stays readable
+    # in viewers that do not draw that picture).
     # The picture hangs off a paragraph of the cover itself, not the page header: Word shows header
-    # content dimmed on screen, which would leave the page pale around the orange cells.
+    # content dimmed on screen, which would fade the accent bars and any page colour.
     section = doc.sections[0]
     holder = doc.add_paragraph()
     holder.paragraph_format.space_after = Pt(0)
@@ -1200,11 +1199,11 @@ def doc_front(doc, details):
     cover.rows[0].height = Inches(4.0)
     cell = cover.rows[0].cells[0]
     cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.BOTTOM
-    for n, (text, size, color, bold) in enumerate((("  illumio", 46, COVER["title"], True), ("Enforcement Summary Report", 32, COVER["title"], True),
-                                                   ("Plan. Track. Enforce.", 14, COVER["text"], True))):
+    for n, (text, size, color, bold) in enumerate((("  illumio", 46, COVER["brand"], True), ("Enforcement Summary Report", 32, COVER["title"], True),
+                                                   ("Plan. Track. Enforce.", 14, COVER["label"], False))):
         par = write_cell(cell, "", widths[0]) if n == 0 else cell.add_paragraph()
         if n == 0:
-            par.add_run().add_picture(logo_png(COVER["title"]), height=Inches(0.62))
+            par.add_run().add_picture(logo_png(COVER["brand"]), height=Inches(0.62))
         run = par.add_run(text)
         run.font.size, run.bold = Pt(size), bold
         run.font.color.rgb = rgb(color)
@@ -1220,7 +1219,7 @@ def doc_front(doc, details):
         row = facts.rows[0] if n == 0 else facts.add_row()
         for i, cell in enumerate(row.cells):
             label, value = (items[i] if isinstance(items[i], tuple) else (items[i], "")) if i < len(items) else ("", "")
-            par = write_cell(cell, label.upper(), widths[i], size=7.5, bold=True, color=COVER["label"])
+            par = write_cell(cell, label.upper(), widths[i], size=7.5, bold=True, color=COVER["accent"])
             par.paragraph_format.left_indent = Inches(0.3)
             par.paragraph_format.space_before = Pt(8)
             par.paragraph_format.space_after = Pt(2)

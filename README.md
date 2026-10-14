@@ -129,7 +129,7 @@ The document (python-docx, charts drawn with matplotlib) is Illumio-themed and l
 with a cover page and a table of contents. The contents are a Word field: Word asks to update
 fields when the document is opened, and answering Yes fills in the page numbers. The cover shows
 `static/logo.png` when that file exists (put the official logo artwork there); otherwise it draws
-the tracker's own mark. The cover page is Illumio orange with white and black type, edge to edge (colours in `COVER` in `reports.py`). Each section starts on a new page:
+the tracker's own mark. The cover page is white with the logo and accents in Illumio orange and navy type (colours in `COVER` in `reports.py`). Each section starts on a new page:
 
 - **Executive Summary** - headline numbers, applications by status, VENs by enforcement mode,
   completion by environment, the consultant's summary and the key findings.
