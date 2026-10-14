@@ -119,7 +119,11 @@ colours are conditional formatting; Status and Priority cells have dropdowns. Ed
 are not written back to the tracker.
 
 **Download Word** (python-docx, charts drawn with matplotlib) gives an Illumio-themed landscape
-document in eight sections:
+document in nine sections:
+
+It opens with a cover page (PCE, project, dates, and Prepared for / Prepared by to fill in) and a
+table of contents. The contents are a Word field: Word asks to update fields when the document is
+opened, and answering Yes fills in the page numbers.
 
 1. **PCE Information Summary** - charts of workloads, VENs, labels, policy and blocked traffic, then
    address, version, cluster health and last sync.
@@ -133,6 +137,9 @@ document in eight sections:
    unmanaged workloads, labelling, unused labels, policy provisioning and coverage, blocked traffic,
    tracker vs PCE, project plan) rated Action, Attention or Good with a recommendation. The ratings
    are fixed rules in `assess()` in `reports.py`, not a manual review.
+9. **Consultant Recommendations** - an empty form on its own page for the consultant to complete in
+   Word: engagement details, executive summary, recommendations (area, observation, recommendation,
+   priority, owner, target date, status), risks and dependencies, next steps, notes and sign-off.
 
 Sections 1 to 4 describe the whole PCE as of the last sync, including applications excluded from tracking.
 

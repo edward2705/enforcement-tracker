@@ -632,19 +632,26 @@ def write_cell(cell, value, width, size=8, bold=False, color=None, right=False):
     return par
 
 
+def grid_lines(table, color=GRID):
+    """Thin lines around and between every cell of a table."""
+    table.style = "Table Grid"
+    for old in table._tbl.tblPr.findall(qn("w:tblBorders")):   # restyling a table replaces its lines
+        table._tbl.tblPr.remove(old)
+    lines = OxmlElement("w:tblBorders")
+    for side in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        line = OxmlElement(f"w:{side}")
+        for attr, value in (("val", "single"), ("sz", "4"), ("space", "0"), ("color", color.lstrip("#"))):
+            line.set(qn(f"w:{attr}"), value)
+        lines.append(line)
+    table._tbl.tblPr.find(qn("w:tblLayout")).addprevious(lines)
+
+
 def doc_table(doc, headers, rows, widths, right=(), bold_rows=(), tints=None, colors=None, badges=None):
     """A banded table with a navy header that repeats on every page. `rows` are lists of cell values,
     `tints` maps a row index to a fill colour and `colors` a column index to a text colour. `badges` is
     (column, {value: (fill, text colour)}): cells of that column are coloured by their value."""
     table, widths = fixed_table(doc, len(headers), widths)
-    table.style = "Table Grid"
-    lines = OxmlElement("w:tblBorders")
-    for side in ("top", "left", "bottom", "right", "insideH", "insideV"):
-        line = OxmlElement(f"w:{side}")
-        for attr, value in (("val", "single"), ("sz", "4"), ("space", "0"), ("color", GRID.lstrip("#"))):
-            line.set(qn(f"w:{attr}"), value)
-        lines.append(line)
-    table._tbl.tblPr.find(qn("w:tblLayout")).addprevious(lines)
+    grid_lines(table)
     repeat = OxmlElement("w:tblHeader")
     repeat.set(qn("w:val"), "true")
     table.rows[0]._tr.get_or_add_trPr().append(repeat)
@@ -883,8 +890,51 @@ def assess(data):
     return out
 
 
+FORM_LINE = "#9AA5B6"   # form tables get darker lines than data tables, so empty cells still read as boxes
+
+
+def form_fields(doc, rows, height=0.34):
+    """Label and empty-cell pairs to fill in; `rows` are lists of labels, two or three to a row.
+    A (label, value) pair instead of a label fills that cell in from the report's own data."""
+    rows = [[item if isinstance(item, tuple) else (item, "") for item in row] for row in rows]
+    per_row = max(len(r) for r in rows)
+    table, widths = fixed_table(doc, per_row * 2, [1.3, 2.0] * per_row)
+    grid_lines(table, FORM_LINE)
+    for n, labels in enumerate(rows):
+        row = table.rows[0] if n == 0 else table.add_row()
+        row.height = Inches(height)
+        for i in range(per_row):
+            label, value = labels[i] if i < len(labels) else ("", "")
+            write_cell(row.cells[i * 2], label, widths[i * 2], bold=True, color=NAVY)
+            style_cell(row.cells[i * 2], ZEBRA)
+            write_cell(row.cells[i * 2 + 1], value, widths[i * 2 + 1], size=10)
+        for cell in row.cells:
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+
+def form_box(doc, height):
+    """An empty bordered box for free text."""
+    table, widths = fixed_table(doc, 1, [1])
+    grid_lines(table, FORM_LINE)
+    table.rows[0].height = Inches(height)
+    write_cell(table.rows[0].cells[0], "", widths[0], size=10)
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+
+def form_grid(doc, headers, widths, blank_rows, height=0.42, numbered=True):
+    """A table with the usual navy header and empty rows to fill in."""
+    rows = [[n + 1 if numbered else ""] + [""] * (len(headers) - 1) for n in range(blank_rows)]
+    table = doc_table(doc, headers, rows, widths, tints={n: "#FFFFFF" for n in range(blank_rows)}, colors={0: MUTED})
+    grid_lines(table, FORM_LINE)
+    for row in table.rows[1:]:
+        row.height = Inches(height)
+    return table
+
+
 def doc_theme(doc, data):
-    """Landscape page, Illumio colours on the headings, and a footer with the page number."""
+    """Landscape page, Illumio colours on the headings, and a footer with the page number on every
+    page but the cover."""
     section = doc.sections[0]
     section.orientation = WD_ORIENT.LANDSCAPE
     section.page_width, section.page_height = section.page_height, section.page_width
@@ -926,18 +976,95 @@ def doc_theme(doc, data):
         run.font.size = Pt(8)
         run.font.color.rgb = rgb(MUTED)
 
-    banner, widths = fixed_table(doc, 2, [2.2, 7.6])
-    left, right = banner.rows[0].cells
-    write_cell(left, "illumio", widths[0], size=30, bold=True, color=ORANGE)
-    write_cell(right, "Enforcement Summary Report", widths[1], size=20, bold=True, color="#FFFFFF")
-    sub = right.add_paragraph()
-    sub.paragraph_format.space_after = Pt(4)
-    run = sub.add_run("Plan. Track. Enforce.")
-    run.font.size = Pt(10)
-    run.font.color.rgb = rgb("#C8D1E0")
-    for cell in (left, right):
-        style_cell(cell, NAVY, bottom=(36, ORANGE))
-        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    section.different_first_page_header_footer = True   # no footer on the cover page
+
+
+def field(par, code, kind):
+    """One piece of a Word field in its own run: "begin", "separate" and "end" markers, or the field code."""
+    run = par.add_run()
+    part = OxmlElement("w:fldChar" if kind else "w:instrText")
+    if kind:
+        part.set(qn("w:fldCharType"), kind)
+    else:
+        part.set(qn("xml:space"), "preserve")
+        part.text = code
+    run._r.append(part)
+    return run
+
+
+def doc_front(doc, details):
+    """Cover page and table of contents, written last (the contents list the headings that exist) and
+    then moved ahead of the first section."""
+    body = doc.element.body
+    first, mark = body[0], len(body) - 1   # new elements are added just before the closing section properties
+    headings = [(p.style.name, p.text) for p in doc.paragraphs if p.style.name in ("Heading 1", "Heading 2")]
+
+    # ---- cover
+    cover, widths = fixed_table(doc, 1, [1])
+    cover.rows[0].height = Inches(3.5)
+    cell = cover.rows[0].cells[0]
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    for n, (text, size, color, bold) in enumerate((("illumio", 46, ORANGE, True), ("Enforcement Summary Report", 30, "#FFFFFF", True),
+                                                   ("Plan. Track. Enforce.", 13, "#C8D1E0", False))):
+        par = write_cell(cell, text, widths[0], size=size, bold=bold, color=color) if n == 0 else cell.add_paragraph()
+        if n:
+            run = par.add_run(text)
+            run.font.size, run.bold = Pt(size), bold
+            run.font.color.rgb = rgb(color)
+        par.paragraph_format.left_indent = Inches(0.45)
+        par.paragraph_format.space_after = Pt(4)
+    style_cell(cell, NAVY, bottom=(48, ORANGE))
+    doc.add_paragraph().paragraph_format.space_after = Pt(18)
+    form_fields(doc, details, height=0.4)
+    note(doc, "Generated by the Illumio Enforcement Tracker from the PCE data of the last sync.")
+
+    # ---- contents: a real Word field, so page numbers are filled in when the document is opened
+    title = doc.add_paragraph()
+    title.paragraph_format.page_break_before = True
+    title.paragraph_format.space_after = Pt(10)
+    run = title.add_run("Table of Contents")
+    run.font.size, run.bold = Pt(16), True
+    run.font.color.rgb = rgb(NAVY)
+    rule = OxmlElement("w:pBdr")
+    line = OxmlElement("w:bottom")
+    for attr, value in (("val", "single"), ("sz", "12"), ("space", "3"), ("color", ORANGE.lstrip("#"))):
+        line.set(qn(f"w:{attr}"), value)
+    rule.append(line)
+    title._p.pPr.find(qn("w:spacing")).addprevious(rule)
+    # Until Word refreshes the field, the list below is what shows (without page numbers).
+    par = None
+    for n, (style, text) in enumerate(headings):
+        par = doc.add_paragraph()
+        par.paragraph_format.space_after = Pt(3 if style == "Heading 2" else 5)
+        if n == 0:
+            field(par, None, "begin")
+            field(par, ' TOC \\o "1-2" \\h \\z \\u ', None)
+            field(par, None, "separate")
+        run = par.add_run(text)
+        if style == "Heading 1":
+            par.paragraph_format.space_before = Pt(6)
+            run.bold = True
+            run.font.color.rgb = rgb(NAVY)
+        else:
+            par.paragraph_format.left_indent = Inches(0.3)
+    if par is not None:
+        field(par, None, "end")
+    refresh = OxmlElement("w:updateFields")   # ask Word to rebuild the contents, with page numbers, on opening
+    refresh.set(qn("w:val"), "true")
+    settings = doc.settings.element
+    after = next((el for tag in ("hdrShapeDefaults", "footnotePr", "endnotePr", "compat", "docVars", "rsids")
+                  for el in settings.findall(qn(f"w:{tag}"))), None)
+    if after is not None:
+        after.addprevious(refresh)
+    else:
+        settings.append(refresh)
+
+    for element in list(body)[mark:-1]:
+        first.addprevious(element)
+    for par in doc.paragraphs:   # the first section starts on the page after the contents
+        if par.style.name == "Heading 1":
+            par.paragraph_format.page_break_before = True
+            break
 
 
 def workload_groups(workloads, key, blank, extra=None):
@@ -1164,6 +1291,39 @@ def build_docx(data):
               [1.6, 3.9, 0.8, 3.5], badges=(2, RATINGS))
     note(doc, "The ratings are applied by fixed rules in the tracker from the numbers in this report, not by a manual review. "
               "Action: something is broken or late. Attention: work still to do. Good: nothing outstanding.")
+
+    # ---- 9. Consultant recommendations: an empty form, completed by hand or in Word after download
+    doc.add_heading("9. Consultant Recommendations", level=1).paragraph_format.page_break_before = True
+    note(doc, "To be completed by the consultant. Type into the empty cells; add rows with Tab from the last cell of a table.")
+    doc.add_heading("Engagement Details", level=2)
+    form_fields(doc, [["Customer", ("PCE", data["pce"]), ("Report date", datetime.date.today().strftime("%b %-d, %Y"))],
+                      ["Consultant", "Role / Company", "Review period"],
+                      ["Customer contact", ("Project", projects), "Next review date"]])
+    doc.add_heading("Executive Summary", level=2)
+    note(doc, "Overall state of the enforcement programme and the main message for stakeholders.")
+    form_box(doc, 1.3)
+    doc.add_heading("Recommendations", level=2)
+    note(doc, "One row per recommendation. Area: for example VENs, Workloads, Labels, Policy, Traffic, Process. "
+              "Priority: High, Medium or Low. Status: Open, In Progress or Done.")
+    form_grid(doc, ["#", "Area", "Observation", "Recommendation", "Priority", "Owner", "Target Date", "Status"],
+              [0.35, 1.1, 2.5, 2.75, 0.7, 1.0, 0.8, 0.8], blank_rows=8)
+    doc.add_heading("Risks and Dependencies", level=2)
+    form_grid(doc, ["#", "Risk or Dependency", "Impact", "Mitigation", "Owner"], [0.35, 3.0, 2.2, 3.05, 1.2], blank_rows=4)
+    doc.add_heading("Next Steps", level=2)
+    form_grid(doc, ["#", "Action", "Owner", "Due Date", "Notes"], [0.35, 4.0, 1.4, 1.0, 3.05], blank_rows=5)
+    doc.add_heading("Additional Notes", level=2)
+    form_box(doc, 1.1)
+    doc.add_heading("Sign-off", level=2)
+    form_grid(doc, ["Role", "Name", "Signature", "Date"], [2.2, 3.0, 3.0, 1.6], blank_rows=3, height=0.5, numbered=False)
+    for row, role in zip(doc.tables[-1].rows[1:], ("Prepared by (Consultant)", "Reviewed by", "Accepted by (Customer)")):
+        run = row.cells[0].paragraphs[0].add_run(role)
+        run.font.size = Pt(8)
+        run.bold = True
+        row.cells[0].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
+    doc_front(doc, [[("PCE", data["pce"]), ("Address", facts[1][1]), ("PCE version", pce.get("version") or "")],
+                    [("Project", projects), ("Last sync", facts[5][1]), ("Report date", datetime.date.today().strftime("%b %-d, %Y"))],
+                    ["Prepared for", "Prepared by", "Document version"]])
 
     stream = io.BytesIO()
     doc.save(stream)
