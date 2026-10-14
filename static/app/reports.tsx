@@ -170,12 +170,9 @@ function EnforcementSummary() {
         <button className="btn btn-light no-print" onClick={() => setViewing(true)} title="Show the Word report here">
           <Icon name="bi-eye" /> View Report
         </button>
-        <a className="btn btn-light no-print" href={excelUrl.replace('.xlsx', '.docx')} title="Download this report as a Word document">
-          <Icon name="bi-file-earmark-word" /> Download Word
-        </a>
-        <a className="btn btn-light no-print" href={excelUrl} title="Download this report as an Excel workbook">
-          <Icon name="bi-file-earmark-excel" /> Download Excel
-        </a>
+        <DownloadButton url={excelUrl.replace('.xlsx', '.docx')} icon="bi-file-earmark-word" label="Download Word"
+          title="Download this report as a Word document" />
+        <DownloadButton url={excelUrl} icon="bi-file-earmark-excel" label="Download Excel" title="Download this report as an Excel workbook" />
         <button className="btn btn-outline-light no-print" onClick={() => window.print()}><Icon name="bi-printer" /> Print</button>
       </section>
       {viewing && <WordViewer url={excelUrl.replace('.xlsx', '.docx')} onClose={() => setViewing(false)} />}
@@ -321,7 +318,7 @@ function WordViewer({ url, onClose }: { url: string; onClose: () => void }) {
         <b>Illumio Enforcement Summary Report</b>
         <span className="muted">The Word report as a preview. Word sets the final page breaks and page numbers.</span>
         <span className="ms-auto d-flex gap-2">
-          <a className="btn btn-light btn-sm" href={url}><Icon name="bi-download" /> Download Word</a>
+          <DownloadButton url={url} icon="bi-download" label="Download Word" className="btn btn-light btn-sm" title="Download the report as a Word document" />
           <button className="btn btn-primary btn-sm" onClick={onClose} autoFocus><Icon name="bi-x-lg" /> Close</button>
         </span>
       </div>
@@ -487,6 +484,44 @@ function SavedRecommendations({ current, flush, onLoaded }: { current: () => any
   );
 }
 
+// Downloads a report with fetch rather than a plain link, so the button shows that the report is being built
+// (a large PCE can take a while) and a server error is shown as a message instead of replacing the page.
+async function downloadFile(url: string) {
+  const res = await fetch(url, { headers: { 'X-Requested-With': 'enforcement-tracker' } });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `The report could not be built (HTTP ${res.status})`);
+  }
+  const name = /filename="?([^";]+)"?/.exec(res.headers.get('Content-Disposition') || '')?.[1] || url.split('/').pop()!.split('?')[0];
+  const blob = await res.blob();
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+}
+
+function DownloadButton({ url, icon, label, title, before, className = 'btn btn-light no-print' }:
+  { url: string; icon: string; label: string; title: string; before?: () => Promise<boolean>; className?: string }) {
+  const { toast } = useStore();
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    setBusy(true);
+    try {
+      if (!before || await before()) await downloadFile(url);
+    } catch (e: any) { toast(e.message || 'Download failed', 'err'); }
+    setBusy(false);
+  };
+  return (
+    <button className={className} onClick={go} disabled={busy} title={title} aria-busy={busy}>
+      {busy ? <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" /> : <Icon name={icon} />}
+      {' '}{busy ? 'Preparing…' : label}
+    </button>
+  );
+}
+
 function SummaryReport() {
   const { data, toast } = useStore();
   const [form, setForm] = useState(null as any);
@@ -530,10 +565,7 @@ function SummaryReport() {
     timer.current = setTimeout(push, 1200);
   };
   const docxUrl = '/api/reports/enforcement-summary.docx' + (project ? `?projects=${project}` : '');
-  const download = async () => {
-    clearTimeout(timer.current);
-    if (await push()) window.location.href = docxUrl;
-  };
+  const beforeDownload = async () => { clearTimeout(timer.current); return push(); };
   // Save the recommendations first, so the view shows what was just typed.
   const view = async () => {
     clearTimeout(timer.current);
@@ -561,9 +593,8 @@ function SummaryReport() {
         <button className="btn btn-light" onClick={view} disabled={!form} title="Save the recommendations and show the Word report here">
           <Icon name="bi-eye" /> View Report
         </button>
-        <button className="btn btn-light" onClick={download} disabled={!form} title="Save the recommendations and download the report as a Word document">
-          <Icon name="bi-file-earmark-word" /> Download Word
-        </button>
+        <DownloadButton url={docxUrl} icon="bi-file-earmark-word" label="Download Word" className="btn btn-light"
+          title="Save the recommendations and download the report as a Word document" before={beforeDownload} />
       </section>
       {viewing && <WordViewer url={docxUrl} onClose={() => setViewing(false)} />}
 
