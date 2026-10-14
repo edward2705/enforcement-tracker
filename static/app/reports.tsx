@@ -361,7 +361,7 @@ const ENGAGEMENT_FIELDS: { key: string; label: string; placeholder?: string }[] 
 ];
 const REPORT_SECTIONS = ['Cover page and table of contents', 'Executive Summary', '1. PCE Information Summary', '2. VENs & Workloads (with unsupported VENs and workloads missing labels)',
   '3. Label Summary', '4. Policy and Blocked Traffic by Scope', '5. Application Enforcement Status', '6. Assessment Summary',
-  '7. Recommendations'];
+  '7. Recommendations (with risky ports suggested for Selective Enforcement and services that need attention)'];
 
 function RowsEditor({ title, hint, columns, rows, addLabel, onChange }: {
   title: string; hint: string; columns: RowColumn[]; rows: any[]; addLabel: string; onChange: (rows: any[]) => void;

@@ -177,6 +177,22 @@ def sync_traffic(client, c, pid):
                 row[f"draft_{draft}_connections"] += 1
                 row[f"draft_{draft}_flows"] += seen
     totals.setdefault((None, None, "all"), dict(blank))
+
+    # Per port, for the Selective Enforcement port suggestions in the Word report.
+    ports = {}
+    for (src_id, dst_id, port, proto, decision), entry in unique.items():
+        row = ports.setdefault((port, proto, decision), {"connections": 0, "flows": 0, "sources": set(), "destinations": set()})
+        row["connections"] += 1
+        row["flows"] += entry["flows"]
+        row["sources"].add(src_id)
+        row["destinations"].add(dst_id)
+    c.execute("DELETE FROM traffic_ports WHERE pce_id = ?", (pid,))
+    for (port, proto, decision), row in ports.items():
+        if proto is None:
+            continue
+        c.execute("INSERT INTO traffic_ports (pce_id, port, proto, decision, connections, flows, sources, destinations) "
+                  "VALUES (?,?,?,?,?,?,?,?)", (pid, port or None, proto, decision, row["connections"], row["flows"],
+                                               len(row["sources"]), len(row["destinations"])))
     cols = TRAFFIC_COLS + DRAFT_COLS
     c.execute("DELETE FROM traffic_summaries WHERE pce_id = ?", (pid,))
     for (aid, eid, direction), row in totals.items():
@@ -229,6 +245,7 @@ def sync(client, c, pid, ts, workloads):
     days = traffic_days(c)   # read once: the period recorded with the snapshot is the one that was queried
     warnings = []
     c.execute("DELETE FROM traffic_summaries WHERE pce_id = ?", (pid,))
+    c.execute("DELETE FROM traffic_ports WHERE pce_id = ?", (pid,))
     info["traffic"] = {"cleared_at": ts}
     db.set_setting(c, f"policy_snapshot:{pid}", json.dumps(info))
     c.commit()
@@ -240,7 +257,8 @@ def sync(client, c, pid, ts, workloads):
             info[part] = {"synced_at": ts, "error": ""}
             if part == "traffic":
                 truncated, draft_error = result
-                info[part].update(days=days, truncated=bool(truncated), draft=not draft_error, draft_error=draft_error)
+                info[part].update(days=days, truncated=bool(truncated), draft=not draft_error, draft_error=draft_error,
+                                  ports=True)   # per-port counts were stored (older syncs did not)
                 if draft_error:
                     warnings.append(f"Could not read draft policy decisions: {draft_error}. Counts by provisioned rules are up to date.")
             elif part == "pce":

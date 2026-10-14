@@ -188,6 +188,18 @@ CREATE TABLE IF NOT EXISTS traffic_summaries (  -- blocked and potentially block
     draft_allowed_flows                   INTEGER NOT NULL DEFAULT 0,
     draft_allowed_connections             INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS traffic_ports (     -- blocked and potentially blocked traffic per port, for the whole PCE
+    id           INTEGER PRIMARY KEY,
+    pce_id       INTEGER NOT NULL REFERENCES pces(id) ON DELETE CASCADE,
+    port         INTEGER,                         -- NULL for protocols without ports (ICMP)
+    proto        INTEGER NOT NULL,                -- IP protocol number: 6 TCP, 17 UDP
+    decision     TEXT    NOT NULL,                -- potentially_blocked or blocked, as the VENs reported it
+    connections  INTEGER NOT NULL DEFAULT 0,      -- source, destination, port and protocol
+    flows        INTEGER NOT NULL DEFAULT 0,      -- times those connections were seen
+    sources      INTEGER NOT NULL DEFAULT 0,      -- different sources
+    destinations INTEGER NOT NULL DEFAULT 0       -- different destinations
+);
+CREATE INDEX IF NOT EXISTS idx_traffic_ports_pce ON traffic_ports(pce_id);
 CREATE TABLE IF NOT EXISTS labels (             -- every label in the PCE and where it is used
     id             INTEGER PRIMARY KEY,
     pce_id         INTEGER NOT NULL REFERENCES pces(id) ON DELETE CASCADE,

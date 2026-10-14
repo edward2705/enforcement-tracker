@@ -72,7 +72,12 @@ def collect(project_ids):
         "WHERE w.pce_id = ?", (pid,))]
     labels = [dict(r) for r in c.execute(
         "SELECT key, value, workload_count, used_by FROM labels WHERE pce_id = ? ORDER BY key COLLATE NOCASE, value COLLATE NOCASE", (pid,))]
-    return {"apps": apps, "people": people, "projects": projects, "tl": tl, "pce": pce_name,
+    ports = {(r["port"], r["proto"]): dict(r) for r in c.execute(
+        "SELECT port, proto, connections, flows, sources, destinations FROM traffic_ports "
+        "WHERE pce_id = ? AND decision = 'potentially_blocked'", (pid,))}
+    blocked = {(r["port"], r["proto"]): r["connections"] for r in c.execute(
+        "SELECT port, proto, connections FROM traffic_ports WHERE pce_id = ? AND decision = 'blocked'", (pid,))}
+    return {"apps": apps, "people": people, "projects": projects, "tl": tl, "pce": pce_name, "ports": ports, "ports_blocked": blocked,
             "last_sync": last["completed_at"] if last else None, "policy": policy.summary(c, pid, apps),
             "workloads": workloads, "labels": labels, "conf": _cfg.get(pce_name) or {}, "consultant": load_consultant(pid)}
 
@@ -1441,6 +1446,129 @@ def workload_labelling(doc, workloads):
             note(doc, f"The first {LABEL_GAP_LIMIT:,} of {len(items):,} workloads are listed, by hostname.")
 
 
+# Ports usually closed first with Selective Enforcement (an enforcement boundary on these ports while the
+# rest of the traffic stays in visibility): remote access and lateral movement, the paths ransomware takes.
+# Always listed in the report.
+SELECTIVE_PORTS = (
+    ("RDP", ((3389, 6), (3389, 17)), "Remote desktop; the most common way attackers move between Windows hosts."),
+    ("SMB", ((445, 6),), "File sharing; ransomware uses it to spread and to encrypt shares."),
+    ("MS-RPC", ((135, 6),), "Remote administration (PsExec, WMI, remote services); widely used for lateral movement."),
+    ("WinRM", ((5985, 6), (5986, 6)), "Remote PowerShell; should only come from admin hosts."),
+    ("NetBIOS", ((137, 17), (138, 17), (139, 6)), "Legacy name and session services; rarely needed between servers."),
+    ("SSH", ((22, 6),), "Remote shell on Linux and Unix; limit to jump hosts and automation."),
+    ("VNC", ((5900, 6),), "Remote desktop, often without strong authentication."),
+    ("Telnet", ((23, 6),), "Unencrypted remote shell; should not be in use."),
+    ("FTP", ((20, 6), (21, 6)), "Unencrypted file transfer and credentials."),
+)
+# Other risky ports, listed only when the last sync found blocked or potentially blocked traffic on them:
+# data stores, management planes and legacy services that should only be reached by known clients.
+RISKY_PORTS = (
+    ("VNC (more displays)", ((5901, 6), (5902, 6), (5903, 6)), "Further VNC remote desktop sessions."),
+    ("rsh / rexec / rlogin", ((512, 6), (513, 6), (514, 6)), "Legacy remote shells with no encryption and weak authentication."),
+    ("TFTP", ((69, 17),), "Unauthenticated file transfer; used to pull tools and configurations."),
+    ("SNMP", ((161, 17), (162, 17)), "Device management; v1 and v2c send community strings in clear text."),
+    ("LLMNR", ((5355, 17),), "Name resolution fallback; spoofed replies capture credentials (like NetBIOS)."),
+    ("LDAP", ((389, 6), (389, 17), (636, 6)), "Directory queries; attackers enumerate users, groups and admins with it."),
+    ("Global Catalog", ((3268, 6), (3269, 6)), "Forest-wide directory queries; same exposure as LDAP."),
+    ("SMTP", ((25, 6),), "Mail relay; only mail servers should send or accept it."),
+    ("rpcbind / NFS", ((111, 6), (111, 17), (2049, 6)), "Unix RPC and file shares; often exported more widely than intended."),
+    ("X11", ((6000, 6),), "Remote display; lets a remote host capture the screen and keystrokes."),
+    ("MS SQL Server", ((1433, 6), (1434, 17)), "Database; should only be reached from its application tier."),
+    ("Oracle", ((1521, 6),), "Database listener; should only be reached from its application tier."),
+    ("MySQL", ((3306, 6),), "Database; should only be reached from its application tier."),
+    ("PostgreSQL", ((5432, 6),), "Database; should only be reached from its application tier."),
+    ("Redis", ((6379, 6),), "In-memory store, often without authentication; a common foothold."),
+    ("Memcached", ((11211, 6), (11211, 17)), "Cache with no authentication; exposes cached data."),
+    ("MongoDB", ((27017, 6),), "Database, often deployed without authentication."),
+    ("Elasticsearch", ((9200, 6), (9300, 6)), "Search cluster, often without authentication; exposes indexed data."),
+    ("Docker API", ((2375, 6), (2376, 6)), "Container engine API; access gives root on the host."),
+    ("Kubernetes API", ((6443, 6),), "Cluster control plane; only admins and cluster nodes need it."),
+    ("Kubelet", ((10250, 6),), "Node agent API; can run commands in any container on the node."),
+    ("etcd", ((2379, 6), (2380, 6)), "Kubernetes state store, including secrets."),
+)
+PROTO_NAMES = {6: "TCP", 17: "UDP"}
+
+
+def selective_ports(doc, data):
+    """Section 7: the risky ports to put under Selective Enforcement. The core remote-access ports are
+    always listed; other risky ports are listed when the last sync found traffic on them. The suggestion
+    comes from whether a boundary on the port would block anything (potentially blocked connections)."""
+    doc.add_heading("Suggested Selective Enforcement Ports", level=2)
+    traffic = data["policy"]["info"].get("traffic") or {}
+    synced = bool(traffic.get("synced_at") and traffic.get("ports"))
+    found = lambda ports: any(p in data["ports"] or p in data["ports_blocked"] for p in ports)
+    listed = [(entry, False) for entry in SELECTIVE_PORTS] + [(entry, True) for entry in RISKY_PORTS if synced and found(entry[1])]
+    rows, ready, review = [], [], []
+    badges = {"Ready": RATINGS["Good"], "Review first": RATINGS["Attention"], "Sync first": ("#EEF0F4", "#6B7280")}
+    for (service, ports, why), extra in listed:
+        label = ", ".join(f"{PROTO_NAMES[proto]} {port}" for port, proto in ports)
+        seen = [data["ports"][p] for p in ports if p in data["ports"]]
+        connections = sum(r["connections"] for r in seen)
+        blocked = sum(data["ports_blocked"].get(p, 0) for p in ports)
+        where = "Found in traffic" if extra else "Core"
+        if not synced:
+            rows.append([label, service, why, "—", "Core", "Sync first", "Sync from PCE to see what this port carries."])
+            continue
+        seen_any = "Yes" if connections or blocked else "No"
+        if not connections:
+            ready.append(service)
+            rows.append([label, service, why, seen_any, where, "Ready",
+                         "Add to the enforcement boundary: no connection on this port would be blocked."])
+        else:
+            review.append(service)
+            rows.append([label, service, why, seen_any, where, "Review first",
+                         f"Write allow rules for the connections that are needed (see Explorer, {label}), then add the port "
+                         "to the boundary."])
+    note(doc, "Selective Enforcement blocks only the ports in an enforcement boundary and leaves the rest of the traffic in "
+              "visibility, so these risky ports can be closed before full enforcement. Traffic that an allow rule permits "
+              "keeps flowing. Core ports are the remote-access and lateral-movement ports usually closed first; the other "
+              "rows are risky ports (data stores, management planes, legacy services) that the last sync found in this PCE's "
+              "traffic. Seen means the last sync found traffic on the port"
+              + (f" in the {traffic.get('days', policy.TRAFFIC_DAYS)} days before it" if synced else "")
+              + ". Ready means a boundary on the port would block nothing; Review first means some connections on it "
+                "are not allowed by a rule yet and would be blocked.")
+    if synced:
+        extra = len(listed) - len(SELECTIVE_PORTS)
+        callout(doc, f"{len(listed)} risky services identified ({len(SELECTIVE_PORTS)} core, {extra} more found in traffic)",
+                [f"Ready for the enforcement boundary now: {', '.join(ready) or 'none'}",
+                 f"Review first, write allow rules for the needed connections: {', '.join(review) or 'none'}"])
+    doc_table(doc, ["Port", "Service", "Why close it", "Seen", "Identified", "Suggestion", "Next Step"],
+              rows, [1.2, 0.95, 2.75, 0.55, 1.0, 0.95, 2.8],
+              badges={3: {"Yes": RATINGS["Attention"], "No": ("#EEF0F4", "#6B7280")}, 5: badges})
+
+
+ATTENTION_PORTS = (
+    ("Windows Delivery Optimization (WDO)", ((7680, 6),),
+     "Windows 10 and 11 service that shares Windows Update and Microsoft Store downloads peer to peer between "
+     "PCs on the network. It is on by default.",
+     "It creates a lot of east-west traffic between workloads that servers rarely need, so it shows up as "
+     "potentially blocked noise in Explorer and pulls effort into rules nobody wants. Any host can also serve "
+     "update content to its peers, which widens what each workload exposes.",
+     "Do not write allow rules for it between servers. Set Delivery Optimization to HTTP only (Download Mode 0 or 99) "
+     "with Group Policy or Intune, or let enforcement block it. If peer caching is wanted, allow it only between "
+     "clients in the same site."),
+    ("Multicast DNS (mDNS)", ((5353, 17),),
+     "Zero-configuration name resolution and service discovery (Bonjour, Avahi, and Windows 10 and later by "
+     "default), sent as multicast to 224.0.0.251 and ff02::fb.",
+     "Every host announces itself to the whole segment, which is noise in the traffic data and tells an attacker "
+     "host names and services. Like LLMNR and NetBIOS, its replies can be spoofed to capture credentials. Data "
+     "centre workloads use DNS, so it is rarely needed.",
+     "Turn it off on servers (Windows: EnableMDNS = 0 under HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters; "
+     "Linux: stop and disable avahi-daemon). Do not write allow rules for it; blocking it is safe where DNS is used."),
+)
+
+
+def attention_ports(doc, data):
+    """Section 7: services that are on by default but rarely needed, and how to deal with them."""
+    doc.add_heading("Services and Ports That Need Attention", level=2)
+    note(doc, "These services are often running without anyone needing them. They add noise to the traffic data and to "
+              "rule writing, and they widen the attack surface. Deal with them at the source rather than with allow rules.")
+    rows = [[", ".join(f"{PROTO_NAMES[proto]} {port}" for port, proto in ports), service, what, why, action]
+            for service, ports, what, why, action in ATTENTION_PORTS]
+    doc_table(doc, ["Port", "Service", "What it is", "Why it needs attention", "Recommendation"],
+              rows, [0.85, 1.1, 2.4, 3.0, 2.85])
+
+
 def build_docx(data, preview=False):
     """The enforcement summary as an Illumio-themed Word document for the customer: cover, contents,
     executive summary, the PCE, VENs and workloads, labels, policy and blocked traffic by scope, the
@@ -1701,16 +1829,6 @@ def build_docx(data, preview=False):
         lead(doc, "Observations and recommendations from the consultant's review of this deployment.")
     else:
         note(doc, "To be completed by the consultant. Type into the empty cells; add rows with Tab from the last cell of a table.")
-    doc.add_heading("Engagement Details", level=2)
-    form_fields(doc, [[("Customer", consultant["customer"]), ("PCE", data["pce"]), ("Report date", datetime.date.today().strftime("%b %-d, %Y"))],
-                      [("Consultant", consultant["consultant"]), ("Role / Company", consultant["role_company"]),
-                       ("Review period", consultant["review_period"])],
-                      [("Customer contact", consultant["customer_contact"]), ("Project", projects),
-                       ("Next review date", consultant["next_review_date"])]])
-    if not consultant["executive_summary"]:   # when entered, it is shown in the Executive Summary at the front
-        doc.add_heading("Executive Summary", level=2)
-        note(doc, "Overall state of the enforcement programme and the main message for stakeholders.")
-        form_box(doc, 1.3)
     doc.add_heading("Recommended Actions", level=2)
     recs = consultant["recommendations"]
     if not recs:
@@ -1721,6 +1839,8 @@ def build_docx(data, preview=False):
               filled=[[r["area"], r["observation"], r["recommendation"], r["priority"], r["owner"],
                        fmt_date(r["target_date"]) if r["target_date"] else "", r["status"]] for r in recs],
               badges={4: {"High": RATINGS["Action"], "Medium": RATINGS["Attention"], "Low": ("#E4EFFC", "#2A78D6")}})
+    selective_ports(doc, data)
+    attention_ports(doc, data)
     doc.add_heading("Risks and Dependencies", level=2)
     form_grid(doc, ["#", "Risk or Dependency", "Impact", "Mitigation", "Owner"], [0.35, 3.0, 2.2, 3.05, 1.2], blank_rows=4,
               filled=[[r["risk"], r["impact"], r["mitigation"], r["owner"]] for r in consultant["risks"]])
