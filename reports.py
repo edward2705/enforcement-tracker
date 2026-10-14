@@ -24,6 +24,7 @@ from flask import Blueprint, Response, jsonify, request
 
 import policy
 import timeline
+import vault
 
 bp = Blueprint("reports", __name__)
 core = None
@@ -65,7 +66,7 @@ def collect(project_ids):
     projects = [p for p in tl["projects"] if not project_ids or p["id"] in project_ids]
     last = c.execute("SELECT completed_at FROM sync_runs WHERE pce_id = ? ORDER BY id DESC LIMIT 1", (pid,)).fetchone()
     # The PCE, VEN, workload and label sections of the Word report describe the whole PCE as of the last sync.
-    workloads = [dict(r) for r in c.execute(
+    workloads = [dict(r, hostname=vault.reveal(r["hostname"], "workloads.hostname")) for r in c.execute(
         "SELECT w.hostname, a.name AS application, e.name AS environment, w.managed, w.online, w.enforcement_mode, w.ven_status, "
         "w.ven_version, w.ven_type, w.os, w.os_detail, w.online, w.role, w.location, w.app_label, w.env_label, w.label_keys FROM workloads w "
         "LEFT JOIN applications a ON a.id = w.application_id LEFT JOIN environments e ON e.id = w.environment_id "

@@ -9,6 +9,8 @@ The ERD is in README.md.
 import os
 import sqlite3
 
+import vault
+
 DB_PATH = os.environ.get(
     "TRACKER_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "tracker.db")
 )
@@ -127,7 +129,7 @@ CREATE TABLE IF NOT EXISTS workloads (          -- snapshot of the PCE's workloa
     id                INTEGER PRIMARY KEY,
     pce_id            INTEGER NOT NULL REFERENCES pces(id) ON DELETE CASCADE,
     href              TEXT    NOT NULL,
-    hostname          TEXT    NOT NULL DEFAULT '',
+    hostname          TEXT    NOT NULL DEFAULT '',   -- IP addresses encrypted (vault.py); host names kept readable
     application_id    INTEGER REFERENCES applications(id) ON DELETE SET NULL,
     environment_id    INTEGER REFERENCES environments(id) ON DELETE SET NULL,
     managed           INTEGER NOT NULL DEFAULT 0 CHECK (managed IN (0, 1)),   -- 1: has a VEN
@@ -355,6 +357,7 @@ def connect():
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")  # SQLite only enforces FKs when asked, per connection
+    con.execute("PRAGMA secure_delete = ON")  # overwrite deleted and replaced values instead of leaving them in free pages
     return con
 
 
@@ -390,6 +393,13 @@ def init():
         con.execute("ALTER TABLE comments ADD COLUMN application_environment_id INTEGER "
                     "REFERENCES application_environments(id) ON DELETE CASCADE")
     con.execute("CREATE INDEX IF NOT EXISTS idx_comments_app_env ON comments(application_environment_id)")
+    # Workloads known only by an IP address, stored before IP addresses were encrypted.
+    migrated = 0
+    for row in con.execute("SELECT id, hostname FROM workloads").fetchall():
+        sealed = vault.encrypt_if_ip(row["hostname"], "workloads.hostname")
+        if sealed != row["hostname"]:
+            con.execute("UPDATE workloads SET hostname = ? WHERE id = ?", (sealed, row["id"]))
+            migrated += 1
     con.execute("CREATE INDEX IF NOT EXISTS idx_app_envs_priority ON application_environments(priority_id)")
     # Comments written on application tasks before the timeline shared the application's thread:
     # move them onto that thread so Application Tracking shows them too. Nothing to do once moved.
@@ -415,6 +425,8 @@ def init():
         con.execute("INSERT OR IGNORE INTO roles (code, name) VALUES (?,?)", (code, name))
         con.execute("UPDATE roles SET name = ? WHERE code = ? AND name <> ?", (name, code, name))  # label renames
     con.commit()
+    if migrated:
+        con.execute("VACUUM")   # rebuild the file so the replaced plain-text values do not linger in free pages
     con.close()
 
 

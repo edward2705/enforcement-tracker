@@ -18,6 +18,8 @@ from urllib.parse import urlsplit
 import requests
 import yaml
 
+import vault
+
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
 CONFIG_HEADER = (
     "# One block per PCE; default_pce is the one the app opens with.\n"
@@ -28,17 +30,57 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 SYNC_PAGE_LIMIT = 500  # the PCE caps synchronous GET collections at 500 items
 
 
+SECRET_FIELDS = ("api_key", "api_secret")   # always encrypted in config.yaml; pce_fqdn too when it is an IP address
+
+
+def _seal(conf):
+    conf = dict(conf)
+    for field in SECRET_FIELDS:
+        if conf.get(field):
+            conf[field] = vault.encrypt(str(conf[field]), "config." + field)
+    if conf.get("pce_fqdn"):
+        conf["pce_fqdn"] = vault.encrypt_if_ip(str(conf["pce_fqdn"]), "config.pce_fqdn")
+    return conf
+
+
+def _open(conf, unreadable):
+    """Decrypt a PCE block. A value that cannot be decrypted (wrong or lost key) is left blank, so the
+    PCE Configuration page asks for it again, and its name is added to `unreadable`."""
+    conf = dict(conf)
+    for field in SECRET_FIELDS + ("pce_fqdn",):
+        if conf.get(field):
+            try:
+                conf[field] = vault.decrypt(conf[field], "config." + field)
+            except vault.VaultError:
+                conf[field] = ""
+                unreadable.append(field)
+    return conf
+
+
 def load_config():
+    """config.yaml with the credentials (and an IP-address PCE FQDN) decrypted. A file still holding
+    them in plain text, hand-edited or from before encryption, is rewritten encrypted."""
     if not os.path.exists(CONFIG_PATH):
         return {}
     with open(CONFIG_PATH) as fh:
-        return yaml.safe_load(fh) or {}
+        raw = yaml.safe_load(fh) or {}
+    unreadable = []
+    cfg = {k: _open(v, unreadable) if isinstance(v, dict) else v for k, v in raw.items()}
+    if not unreadable and any(isinstance(v, dict) and _plain(v) for v in raw.values()):
+        save_config(cfg)
+    return cfg
+
+
+def _plain(conf):
+    """True when a field that should be encrypted is still plain text."""
+    return any(conf.get(f) and not vault.is_encrypted(conf[f]) for f in SECRET_FIELDS) or \
+        bool(conf.get("pce_fqdn") and vault.is_ip(conf["pce_fqdn"]))
 
 
 def save_config(cfg):
-    """Rewrite config.yaml atomically, keeping it readable only by the owner."""
+    """Rewrite config.yaml atomically, keeping it readable only by the owner, with the credentials encrypted."""
     ordered = {"default_pce": cfg.get("default_pce")}
-    ordered.update({k: v for k, v in cfg.items() if k != "default_pce"})
+    ordered.update({k: _seal(v) if isinstance(v, dict) else v for k, v in cfg.items() if k != "default_pce"})
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(CONFIG_PATH), prefix=".config-")
     try:
         with os.fdopen(fd, "w") as fh:

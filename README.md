@@ -347,4 +347,18 @@ Conventions (see `db.py`):
   For a second layer, give the tracker an API key with a read-only role in the PCE.
 - Write requests require a custom header, so other websites open in the same browser cannot call the API.
 - API secrets stay in `config.yaml` (mode `600`) and are never returned to the browser.
-- `config.yaml` and `tracker.db` are listed in `.gitignore`.
+- **Encryption at rest** (`vault.py`): AES-256-GCM, a random nonce per value, authenticated so a changed or moved
+  value is refused.
+  - `config.yaml`: `api_key` and `api_secret` are always stored encrypted (`enc:v1:...`), and `pce_fqdn` too when
+    it is an IP address. A file with plain-text credentials (hand-edited, or from before encryption) is rewritten
+    encrypted the next time it is read.
+  - `tracker.db`: workload names that are IP addresses (unmanaged workloads) are stored encrypted; host names stay
+    readable so they can be sorted and searched. Existing rows are encrypted at startup and the file is vacuumed;
+    `secure_delete` overwrites deleted values. Traffic is stored as counts only, with no addresses.
+  - The 256-bit key is `secret.key` next to the app (created on first run, mode `600`, in `.gitignore`), or the
+    `TRACKER_SECRET_KEY` environment variable (base64url) to keep it off that disk. Each machine has its own key.
+    Keep the key out of backups of `config.yaml` and `tracker.db`. If it is lost, re-enter the API key and secret
+    on the PCE Configuration page and run a sync.
+  - This protects copies of the files (backups, accidental commits, a copied database). It does not protect
+    against someone who can read the key on the running machine.
+- `config.yaml`, `tracker.db` and `secret.key` are listed in `.gitignore`.

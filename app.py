@@ -13,6 +13,7 @@ from flask import Flask, Response, g, jsonify, request, send_from_directory
 from werkzeug.serving import make_server
 
 import db
+import vault
 import pce as pcelib
 import policy
 
@@ -491,7 +492,7 @@ def sync():
             "INSERT OR REPLACE INTO workloads (pce_id, href, hostname, application_id, environment_id, managed, online, "
             "enforcement_mode, ven_status, ven_version, ven_type, policy_sync_state, last_heartbeat, os, location, role, "
             "app_label, env_label, label_keys, os_detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (pid, wl.get("href", ""), wl.get("hostname") or wl.get("name") or "",
+            (pid, wl.get("href", ""), vault.encrypt_if_ip(wl.get("hostname") or wl.get("name") or "", "workloads.hostname"),
              app_ids.get((labels.get("app") or {}).get("href")), env_id.get((labels.get("env") or {}).get("href")),
              1 if wl.get("managed") else 0, 1 if wl.get("online") else 0, wl.get("enforcement_mode") or "",
              ven.get("status") or agent.get("status") or "", ven.get("version") or agent.get("agent_version") or "",
@@ -533,7 +534,11 @@ def ven_inventory():
         "FROM workloads w LEFT JOIN applications a ON a.id = w.application_id LEFT JOIN environments e ON e.id = w.environment_id "
         "WHERE w.pce_id = ? AND COALESCE(a.hidden, 0) = 0 AND COALESCE(a.excluded, 0) = 0 "
         "ORDER BY a.name IS NULL, a.name COLLATE NOCASE, e.name COLLATE NOCASE, w.hostname COLLATE NOCASE", (pce_id_for(name),))
-    return jsonify(workloads=[dict(r) for r in rows])
+    workloads = [dict(r, hostname=vault.reveal(r["hostname"], "workloads.hostname")) for r in rows]
+    # Encrypted IP addresses do not sort in SQL: sort host names again once decrypted (the sort is stable).
+    workloads.sort(key=lambda w: (w["application"] is None, (w["application"] or "").lower(), (w["environment"] or "").lower(),
+                                  (w["hostname"] or "").lower()))
+    return jsonify(workloads=workloads)
 
 
 # ---------------------------------------------------------------------- applications
