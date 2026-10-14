@@ -172,12 +172,13 @@ the tracker's own mark. The cover page is white with the logo and accents in Ill
   form (and so in the report), **Update** overwrites it with the form, and saving under an existing name replaces it.
   It also has **Suggested Selective Enforcement Ports**: the high-risk ports usually closed first with an
   enforcement boundary (RDP, SMB, MS-RPC, WinRM, NetBIOS, SSH, VNC, Telnet, FTP; the list is `SELECTIVE_PORTS` in
-  `reports.py`), always listed as **Core**, plus other risky ports the last sync **found in traffic** (blocked or
+  `reports.py`), always listed, plus other risky ports the last sync found in traffic (blocked or
   potentially blocked): databases, Redis, MongoDB, Elasticsearch, Docker, Kubernetes, LDAP, SNMP, TFTP, LLMNR, rsh
-  and more; the list is `RISKY_PORTS`. A callout counts them and lists which are ready and which need review.
-  For each, the potentially blocked connections on that port from the last sync decide the
-  suggestion: **Ready** (nothing would be blocked, add it to the boundary) or **Review first** (write allow rules
-  for the needed connections, then add it). Sync stores these per-port counts in `traffic_ports`, cleared on every sync.
+  and more; the list is `RISKY_PORTS`. Each row has a short description of what the service does (`PORT_PURPOSE`),
+  why to close it, and **Seen** (traffic found on it). Every port is **Review first**: when the last sync found no
+  connection on it that would be blocked, the next step is to confirm with the application owners and add it to
+  the boundary; otherwise to write allow rules for the needed connections first. A callout lists the two groups.
+  Sync stores the per-port counts in `traffic_ports`, cleared on every sync.
   **Services and Ports That Need Attention** follows: services on by default but rarely needed (Windows Delivery
   Optimization TCP 7680, Multicast DNS UDP 5353; the list is `ATTENTION_PORTS`), each with what it is, why it needs
   attention and how to deal with it at the source.

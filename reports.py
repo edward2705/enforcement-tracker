@@ -1473,55 +1473,88 @@ RISKY_PORTS = (
     ("Kubelet", ((10250, 6),), "Node agent API; can run commands in any container on the node."),
     ("etcd", ((2379, 6), (2380, 6)), "Kubernetes state store, including secrets."),
 )
+# What each service in SELECTIVE_PORTS and RISKY_PORTS does, in a few words, for the report.
+PORT_PURPOSE = {
+    "RDP": "Remote Desktop: log on to a Windows host's desktop over the network.",
+    "SMB": "Windows file and printer sharing; also used by Group Policy and remote admin tools.",
+    "MS-RPC": "Windows RPC endpoint mapper: starts remote services such as WMI, DCOM and service control.",
+    "WinRM": "Windows Remote Management: remote PowerShell and scripted administration.",
+    "NetBIOS": "Legacy Windows name lookup, browsing and file-sharing sessions.",
+    "SSH": "Encrypted remote shell, file copy (SCP/SFTP) and tunnels, mostly on Linux and Unix.",
+    "VNC": "Remote control of a host's screen, keyboard and mouse.",
+    "Telnet": "Plain-text remote command line.",
+    "FTP": "File transfer with user name and password in plain text.",
+    "VNC (more displays)": "Extra VNC remote-control sessions (displays :1 to :3).",
+    "rsh / rexec / rlogin": "Legacy Unix remote shell, command execution and login.",
+    "TFTP": "Simple file transfer with no login, used for network boot and device configuration.",
+    "SNMP": "Monitoring and management of network devices and servers.",
+    "LLMNR": "Windows name lookup on the local network when DNS has no answer.",
+    "LDAP": "Directory queries and logons against Active Directory or other directories.",
+    "Global Catalog": "Active Directory searches across every domain in the forest.",
+    "SMTP": "Sending and relaying email between mail servers.",
+    "rpcbind / NFS": "Unix RPC service lookup and NFS network file shares.",
+    "X11": "Unix remote graphical display.",
+    "MS SQL Server": "Microsoft SQL Server database connections (1434: instance lookup).",
+    "Oracle": "Oracle database listener: client connections to the database.",
+    "MySQL": "MySQL and MariaDB database connections.",
+    "PostgreSQL": "PostgreSQL database connections.",
+    "Redis": "Redis in-memory data store and cache.",
+    "Memcached": "Memcached in-memory cache.",
+    "MongoDB": "MongoDB document database connections.",
+    "Elasticsearch": "Elasticsearch search API (9200) and cluster traffic (9300).",
+    "Docker API": "Remote control of the Docker container engine.",
+    "Kubernetes API": "Kubernetes control plane: kubectl and cluster components.",
+    "Kubelet": "Kubernetes node agent API: runs and inspects the containers on a node.",
+    "etcd": "Kubernetes key-value store: client (2379) and peer (2380) traffic.",
+}
 PROTO_NAMES = {6: "TCP", 17: "UDP"}
 
 
 def selective_ports(doc, data):
     """Section 6: the risky ports to put under Selective Enforcement. The core remote-access ports are
-    always listed; other risky ports are listed when the last sync found traffic on them. The suggestion
-    comes from whether a boundary on the port would block anything (potentially blocked connections)."""
+    always listed; other risky ports are listed when the last sync found traffic on them. Every port is
+    reviewed before it goes into the boundary; the next step depends on whether a boundary on it would
+    block anything (potentially blocked connections)."""
     doc.add_heading("Suggested Selective Enforcement Ports", level=2)
     traffic = data["policy"]["info"].get("traffic") or {}
     synced = bool(traffic.get("synced_at") and traffic.get("ports"))
     found = lambda ports: any(p in data["ports"] or p in data["ports_blocked"] for p in ports)
     listed = [(entry, False) for entry in SELECTIVE_PORTS] + [(entry, True) for entry in RISKY_PORTS if synced and found(entry[1])]
-    rows, ready, review = [], [], []
-    badges = {"Ready": RATINGS["Good"], "Review first": RATINGS["Attention"], "Sync first": ("#EEF0F4", "#6B7280")}
-    for (service, ports, why), extra in listed:
+    rows, clear, needs_rules = [], [], []
+    badges = {"Review first": RATINGS["Attention"], "Sync first": ("#EEF0F4", "#6B7280")}
+    for (service, ports, why), _extra in listed:
         label = ", ".join(f"{PROTO_NAMES[proto]} {port}" for port, proto in ports)
-        seen = [data["ports"][p] for p in ports if p in data["ports"]]
-        connections = sum(r["connections"] for r in seen)
+        connections = sum(data["ports"][p]["connections"] for p in ports if p in data["ports"])
         blocked = sum(data["ports_blocked"].get(p, 0) for p in ports)
-        where = "Found in traffic" if extra else "Core"
         if not synced:
-            rows.append([label, service, why, "—", "Core", "Sync first", "Sync from PCE to see what this port carries."])
+            rows.append([label, service, PORT_PURPOSE.get(service, ""), why, "—", "Sync first", "Sync from PCE to see what this port carries."])
             continue
         seen_any = "Yes" if connections or blocked else "No"
         if not connections:
-            ready.append(service)
-            rows.append([label, service, why, seen_any, where, "Ready",
-                         "Add to the enforcement boundary: no connection on this port would be blocked."])
+            clear.append(service)
+            rows.append([label, service, PORT_PURPOSE.get(service, ""), why, seen_any, "Review first",
+                         "Confirm with the application owners that nothing needs this port, then add it to the enforcement "
+                         "boundary: the last sync found no connection on it that would be blocked."])
         else:
-            review.append(service)
-            rows.append([label, service, why, seen_any, where, "Review first",
+            needs_rules.append(service)
+            rows.append([label, service, PORT_PURPOSE.get(service, ""), why, seen_any, "Review first",
                          f"Write allow rules for the connections that are needed (see Explorer, {label}), then add the port "
                          "to the boundary."])
     note(doc, "Selective Enforcement blocks only the ports in an enforcement boundary and leaves the rest of the traffic in "
               "visibility, so these risky ports can be closed before full enforcement. Traffic that an allow rule permits "
-              "keeps flowing. Core ports are the remote-access and lateral-movement ports usually closed first; the other "
-              "rows are risky ports (data stores, management planes, legacy services) that the last sync found in this PCE's "
-              "traffic. Seen means the last sync found traffic on the port"
+              "keeps flowing. The first rows are the remote-access and lateral-movement ports usually closed first; the "
+              "others are risky ports (data stores, management planes, legacy services) that the last sync found in this "
+              "PCE's traffic. Seen means the last sync found traffic on the port"
               + (f" in the {traffic.get('days', policy.TRAFFIC_DAYS)} days before it" if synced else "")
-              + ". Ready means a boundary on the port would block nothing; Review first means some connections on it "
-                "are not allowed by a rule yet and would be blocked.")
+              + ". Review every port before adding it to the boundary.")
     if synced:
         extra = len(listed) - len(SELECTIVE_PORTS)
         callout(doc, f"{len(listed)} risky services identified ({len(SELECTIVE_PORTS)} core, {extra} more found in traffic)",
-                [f"Ready for the enforcement boundary now: {', '.join(ready) or 'none'}",
-                 f"Review first, write allow rules for the needed connections: {', '.join(review) or 'none'}"])
-    doc_table(doc, ["Port", "Service", "Why close it", "Seen", "Identified", "Suggestion", "Next Step"],
-              rows, [1.2, 0.95, 2.75, 0.55, 1.0, 0.95, 2.8],
-              badges={3: {"Yes": RATINGS["Attention"], "No": ("#EEF0F4", "#6B7280")}, 5: badges})
+                [f"No connection would be blocked, confirm and add: {', '.join(clear) or 'none'}",
+                 f"Connections would be blocked, write allow rules first: {', '.join(needs_rules) or 'none'}"])
+    doc_table(doc, ["Port", "Service", "What it does", "Why close it", "Seen", "Suggestion", "Next Step"],
+              rows, [1.1, 0.95, 2.3, 2.4, 0.55, 0.9, 2.6],
+              badges={4: {"Yes": RATINGS["Attention"], "No": ("#EEF0F4", "#6B7280")}, 5: badges})
 
 
 ATTENTION_PORTS = (
