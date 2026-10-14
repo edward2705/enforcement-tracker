@@ -1004,13 +1004,6 @@ def assess(data):
         else:
             add("Policy coverage", "Every tracked scope with VENs has a ruleset of its own.", "Good", "No action needed.")
 
-    drift = [r["scope"] for r in pol["rows"] if r["tracked"] and core.PCE_STATE_STATUS.get(r["pce_state"]) != r["status"]]
-    if drift:
-        add("Project status vs PCE", f"{len(drift):,} scope(s) have a project status that differs from what the PCE shows: {names(drift)}.", "Attention",
-            "Update the project status, or change the enforcement mode in the PCE, so the two agree.")
-    else:
-        add("Project status vs PCE", "The project status of every scope agrees with the PCE.", "Good", "No action needed.")
-
     tasks, _preds = task_rows(data["tl"], data["projects"])
     leaves = [r for r in tasks if r["kind"] == "task"]
     if leaves:
@@ -1574,8 +1567,6 @@ def build_docx(data, preview=False):
     info, t = pol["info"], pol["totals"]
     pce = info.get("pce") or {}
     types = pce.get("label_types") or {}
-    traffic = info.get("traffic") or {}
-    days = traffic.get("days", policy.TRAFFIC_DAYS)
     workloads, labels = data["workloads"], data["labels"]
     vens = [w for w in workloads if w["managed"]]
     unused = [l for l in labels if not l["used_by"]]
@@ -1632,10 +1623,7 @@ def build_docx(data, preview=False):
         lambda ax: hbars(ax, f"Policy ({t['rulesets']:,} rulesets)",
                          [("Rules in draft", t["rules_draft"]), ("Rules provisioned", t["rules_active"]),
                           ("Draft not provisioned", t["rules_pending"])], [NAVY, "#17994F", ORANGE], share=False),
-        lambda ax: hbars(ax, f"Blocked Traffic ({days} days)",
-                         [("Potentially blocked flows", t["potentially_blocked_flows"]), ("Blocked flows", t["blocked_flows"])],
-                         ["#E39B00", "#D03B3B"]),
-    ], height=2.7, widths=[1, 1, 1, 1.15, 1.15])
+    ], height=2.7, widths=[1, 1, 1, 1.3])
     cluster = "  ·  ".join(x for x in ((pce.get("status") or "").capitalize(), pce.get("cluster_type") or "",
                                        f"{pce['nodes']} node(s)" if pce.get("nodes") else "") if x)
     address = f"{conf.get('pce_fqdn', '')}:{conf.get('port', 443)}" if conf.get("pce_fqdn") else ""

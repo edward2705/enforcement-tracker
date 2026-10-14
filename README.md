@@ -145,7 +145,7 @@ the tracker's own mark. The cover page is white with the logo and accents in Ill
 
 - **Executive Summary** - headline numbers, applications by status, VENs by enforcement mode,
   completion by environment and the key findings.
-- **1. PCE Information Summary** - charts of workloads, VENs, labels, policy and blocked traffic, then
+- **1. PCE Information Summary** - charts of workloads, VENs, labels and policy, then
   address, version and cluster health.
 - **2. VENs & Workloads** - deployed VENs by type (server, endpoint, containerized), online, offline,
   suspended, unmanaged workloads and enforcement modes as measure tables; charts of VENs by type,
@@ -164,7 +164,7 @@ the tracker's own mark. The cover page is white with the logo and accents in Ill
   named in a callout above the table, and application-only scopes get a row of their own.
 - **5. Assessment Summary** - one finding per area (enforcement coverage, VEN connectivity,
   unmanaged workloads, labelling, unused labels, policy provisioning and coverage,
-  project status vs PCE, project plan, VEN type) rated Critical, Action, Attention or Good with a recommendation. The
+  project plan, VEN type) rated Critical, Action, Attention or Good with a recommendation. The
   ratings are fixed rules in `assess()` in `reports.py`, not a manual review.
 - **6. Recommendations** - what the consultant entered on the Reports tab, or the empty form, and a sign-off table.
   **Saved Recommendations** on that tab saves the whole form (engagement details, recommended actions, risks,
