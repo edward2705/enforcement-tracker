@@ -289,7 +289,7 @@ const ENGAGEMENT_FIELDS: { key: string; label: string; placeholder?: string }[] 
 ];
 const REPORT_SECTIONS = ['Cover page and table of contents', 'Executive Summary', '1. PCE Information Summary', '2. VENs & Workloads',
   '3. Label Summary', '4. Policy and Blocked Traffic by Scope', '5. Application Enforcement Status', '6. Assessment Summary',
-  '7. Consultant Recommendations'];
+  '7. Recommendations'];
 
 function RowsEditor({ title, hint, columns, rows, addLabel, onChange }: {
   title: string; hint: string; columns: RowColumn[]; rows: any[]; addLabel: string; onChange: (rows: any[]) => void;
@@ -408,8 +408,8 @@ function SummaryReport() {
 
       <section className="card-x">
         <div className="hd">
-          <h2>Consultant Recommendations</h2>
-          <span className="hint">Printed in section 7 of the Word document. Anything left empty becomes a blank form to fill in by hand.</span>
+          <h2>Recommendations</h2>
+          <span className="hint">Filled in by the consultant and printed in section 7 of the Word document. Anything left empty becomes a blank form to fill in by hand.</span>
           <span className={`cr-state ms-auto ${state}`} role="status">{status}</span>
         </div>
         {!form ? <div className="boot" style={{ height: 160 }}><div className="spinner-border text-primary" role="status" /></div> : (
@@ -431,7 +431,7 @@ function SummaryReport() {
               <textarea className="form-control" rows={4} maxLength={6000} aria-label="Executive summary" value={form.executive_summary || ''}
                 onChange={(e: any) => change({ executive_summary: e.target.value })} />
             </div>
-            <RowsEditor title="Recommendations" hint="One row per recommendation" columns={RECOMMENDATION_COLS} rows={form.recommendations}
+            <RowsEditor title="Recommended Actions" hint="One row per recommendation" columns={RECOMMENDATION_COLS} rows={form.recommendations}
               addLabel="Add recommendation" onChange={rows => change({ recommendations: rows })} />
             <RowsEditor title="Risks and Dependencies" hint="What could delay enforcement, and how it is handled" columns={RISK_COLS} rows={form.risks}
               addLabel="Add risk" onChange={rows => change({ risks: rows })} />

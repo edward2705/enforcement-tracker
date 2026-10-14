@@ -119,7 +119,7 @@ colours are conditional formatting; Status and Priority cells have dropdowns. Ed
 are not written back to the tracker.
 
 **Reports → Enforcement Summary Report** is the Word document for the customer. The tab has the
-**Download Word** button and a **Consultant Recommendations** form: engagement details, executive
+**Download Word** button and a **Recommendations** form for the consultant: engagement details, executive
 summary, recommendations (area, observation, recommendation, priority, owner, target date, status),
 risks and dependencies, next steps and notes. The form saves by itself a moment after typing stops
 (`consultant_reports` table, one document per PCE) and is printed in the Word document; whatever is
@@ -129,7 +129,7 @@ The document (python-docx, charts drawn with matplotlib) is Illumio-themed and l
 with a cover page and a table of contents. The contents are a Word field: Word asks to update
 fields when the document is opened, and answering Yes fills in the page numbers. The cover shows
 `static/logo.png` when that file exists (put the official logo artwork there); otherwise it draws
-the tracker's own mark. Each section starts on a new page:
+the tracker's own mark. The cover page is Illumio orange with white and black type, edge to edge (colours in `COVER` in `reports.py`). Each section starts on a new page:
 
 - **Executive Summary** - headline numbers, applications by status, VENs by enforcement mode,
   completion by environment, the consultant's summary and the key findings.
@@ -148,7 +148,7 @@ the tracker's own mark. Each section starts on a new page:
   unmanaged workloads, labelling, unused labels, policy provisioning and coverage, blocked traffic,
   project status vs PCE, project plan) rated Action, Attention or Good with a recommendation. The
   ratings are fixed rules in `assess()` in `reports.py`, not a manual review.
-- **7. Consultant Recommendations** - what was entered on the Reports tab, or the empty form, and a sign-off table.
+- **7. Recommendations** - what the consultant entered on the Reports tab, or the empty form, and a sign-off table.
 
 Sections 1 to 3 describe the whole PCE as of the last sync, including applications excluded from tracking.
 
@@ -279,6 +279,12 @@ Conventions (see `db.py`):
 - The server listens on `127.0.0.1` and on the address of the machine's hostname, and has no login: anyone who can
   reach that address on the network can read and change the tracker and its PCE settings. Restrict the port with a
   firewall or put the app behind an authenticating proxy.
+- **The PCE is read-only to this app.** Every request to the PCE goes through `ReadOnlySession` in `pce.py`,
+  which refuses anything but `GET` before it is sent: no `PUT`, `PATCH`, `POST` or `DELETE` can reach labels,
+  workloads, policy or any other PCE object, even if code is added later that tries. The only exceptions are
+  creating the Explorer traffic query and deleting that same query afterwards. Requests are also refused
+  unless they go to the configured PCE over HTTPS. `python -m unittest discover tests` checks all of this.
+  For a second layer, give the tracker an API key with a read-only role in the PCE.
 - Write requests require a custom header, so other websites open in the same browser cannot call the API.
 - API secrets stay in `config.yaml` (mode `600`) and are never returned to the browser.
 - `config.yaml` and `tracker.db` are listed in `.gitignore`.

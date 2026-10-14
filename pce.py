@@ -1,9 +1,15 @@
-"""Illumio PCE connection settings (config.yaml) and a small read-only REST client."""
+"""Illumio PCE connection settings (config.yaml) and a small read-only REST client.
+
+The tracker only pulls data. ReadOnlySession enforces that for every request this module can send:
+GET is allowed; anything that could change the PCE (POST, PUT, PATCH, DELETE) is refused before it
+leaves the machine. The one exception is the Explorer traffic query, which the PCE only offers as a
+POST: creating that query, and deleting the query this client created, are allowed and nothing else."""
 import datetime
 import os
 import re
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 import requests
 import yaml
@@ -49,6 +55,34 @@ class PCEError(Exception):
     pass
 
 
+class ReadOnlySession(requests.Session):
+    """A requests session that cannot change anything in the PCE.
+
+    Every request goes through request(), so the check also covers code that uses the session
+    directly. Allowed: GET to this PCE; POST to the org's traffic query collection (a read that the
+    PCE runs as a background query); DELETE of a traffic query this session created. Everything
+    else raises PCEError without being sent."""
+
+    def __init__(self, host, org):
+        super().__init__()
+        self.host = host.lower()                       # "fqdn:port"; credentials are never sent anywhere else
+        self.query_path = f"/api/v2/orgs/{org}/traffic_flows/async_queries"
+        self.own_queries = set()                       # paths of the traffic queries created by this session
+
+    def request(self, method, url, *args, **kwargs):
+        method = (method or "").upper()
+        target = urlsplit(url)
+        path = target.path.rstrip("/")
+        if target.scheme != "https" or target.netloc.lower() != self.host:
+            raise PCEError(f"Blocked {method} to {target.netloc or url}: requests only go to the configured PCE over HTTPS")
+        allowed = (method == "GET"
+                   or (method == "POST" and path == self.query_path)
+                   or (method == "DELETE" and path in self.own_queries))
+        if not allowed:
+            raise PCEError(f"Blocked {method} {target.path}: the tracker only reads from the PCE and never changes it")
+        return super().request(method, url, *args, **kwargs)
+
+
 class PCE:
     def __init__(self, name, conf):
         self.name = name
@@ -59,7 +93,7 @@ class PCE:
             raise PCEError(f"PCE '{name}' has no pce_fqdn configured")
         self.root = f"https://{self.fqdn}:{self.port}/api/v2"
         self.base = f"{self.root}/orgs/{self.org}"
-        self.session = requests.Session()
+        self.session = ReadOnlySession(f"{self.fqdn}:{self.port}", self.org)
         self.session.auth = (str(conf.get("api_key") or ""), str(conf.get("api_secret") or ""))
         self.session.headers["Accept"] = "application/json"
         cert = conf.get("cert_path")
@@ -119,7 +153,8 @@ class PCE:
         """Flows with the given policy decisions over the last `days` days, from an Explorer async query.
 
         This is the one request that is not a GET: the PCE only answers traffic questions through a
-        query it runs in the background. The query is deleted again once its result is downloaded."""
+        query it runs in the background. It reads traffic and changes no workload, label or policy;
+        the query is deleted again once its result is downloaded (see ReadOnlySession)."""
         end = datetime.datetime.now(datetime.timezone.utc)
         body = {
             "query_name": "enforcement-tracker blocked traffic",
@@ -130,6 +165,7 @@ class PCE:
             "policy_decisions": list(decisions), "max_results": max_results,
         }
         job = self._check(self.session.post(self.base + "/traffic_flows/async_queries", json=body, timeout=30)).json()["href"]
+        self.session.own_queries.add(urlsplit(self.root + job).path)   # the only thing this client may delete
         try:
             deadline = time.time() + max_wait
             while True:

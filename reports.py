@@ -933,9 +933,9 @@ def assess(data):
 LOGO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "logo.png")
 
 
-def logo_png():
+def logo_png(color=ORANGE):
     """The logo for the cover page. static/logo.png is used when it exists (drop the official artwork
-    there); otherwise the tracker's own mark, the one in the app's sidebar, is drawn."""
+    there); otherwise the tracker's own mark, the one in the app's sidebar, is drawn in `color`."""
     if os.path.exists(LOGO_FILE):
         return LOGO_FILE
     fig = Figure(figsize=(2, 2), dpi=220)
@@ -945,13 +945,65 @@ def logo_png():
     ax.set_ylim(30, 2)
     ax.axis("off")
     for x0, x1, x2 in ((4, 12, 7.5), (28, 20, 24.5)):   # the two brackets
-        ax.fill([x0, x1, x1, x2, x2, x1, x1, x0], [4, 4, 7.5, 7.5, 24.5, 24.5, 28, 28], color=ORANGE, linewidth=0)
+        ax.fill([x0, x1, x1, x2, x2, x1, x1, x0], [4, 4, 7.5, 7.5, 24.5, 24.5, 28, 28], color=color, linewidth=0)
     for xs in ((11, 21), (21, 11)):                      # the cross between them
-        ax.plot(xs, (11, 21), color=ORANGE, linewidth=13, solid_capstyle="round")
+        ax.plot(xs, (11, 21), color=color, linewidth=13, solid_capstyle="round")
     stream = io.BytesIO()
     fig.savefig(stream, format="png", transparent=True)
     stream.seek(0)
     return stream
+
+
+BLACK = "#000000"
+# Cover page colours: Illumio orange, white for the large type, black for the small type (white is
+# too faint on orange at small sizes) and for the accents.
+COVER = {"page": ORANGE, "accent": BLACK, "title": "#FFFFFF", "text": BLACK, "label": "#4A1D05", "empty": "#B4470F", "line": "#D9571A"}
+
+
+def cover_background(width, height):
+    """The cover page backdrop as a PNG the size of the page: orange, with a black bar down the left
+    edge and a black line along the bottom. Both accents sit in the page margins, clear of the text."""
+    fig = Figure(figsize=(width, height), dpi=110)
+    FigureCanvasAgg(fig)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, width)
+    ax.set_ylim(0, height)
+    ax.axis("off")
+    ax.fill([0, width, width, 0], [0, 0, height, height], color=COVER["page"], linewidth=0)
+    ax.fill([0, 0.2, 0.2, 0], [0, 0, height, height], color=COVER["accent"], linewidth=0)
+    ax.fill([0.9, width - 0.6, width - 0.6, 0.9], [0.36, 0.36, 0.39, 0.39], color=COVER["accent"], linewidth=0)
+    stream = io.BytesIO()
+    fig.savefig(stream, format="png", facecolor=COVER["page"])
+    stream.seek(0)
+    return stream
+
+
+def behind_page(run):
+    """Turn the inline picture in `run` into one fixed to the top-left corner of the page, behind the text."""
+    inline = run._r.find(".//" + qn("wp:inline"))
+    anchor = OxmlElement("wp:anchor")
+    for attr, value in (("distT", "0"), ("distB", "0"), ("distL", "0"), ("distR", "0"), ("simplePos", "0"), ("relativeHeight", "0"),
+                        ("behindDoc", "1"), ("locked", "1"), ("layoutInCell", "1"), ("allowOverlap", "1")):
+        anchor.set(attr, value)
+    origin = OxmlElement("wp:simplePos")
+    origin.set("x", "0")
+    origin.set("y", "0")
+    anchor.append(origin)
+    for tag in ("wp:positionH", "wp:positionV"):
+        position = OxmlElement(tag)
+        position.set("relativeFrom", "page")
+        offset = OxmlElement("wp:posOffset")
+        offset.text = "0"
+        position.append(offset)
+        anchor.append(position)
+    kept = {child.tag: child for child in inline}
+    for tag in ("wp:extent", "wp:effectExtent"):
+        if qn(tag) in kept:
+            anchor.append(kept[qn(tag)])
+    anchor.append(OxmlElement("wp:wrapNone"))
+    for tag in ("wp:docPr", "wp:cNvGraphicFramePr", "a:graphic"):
+        anchor.append(kept[qn(tag)])
+    inline.getparent().replace(inline, anchor)
 
 
 def fmt_date(iso):
@@ -1130,25 +1182,61 @@ def doc_front(doc, details):
     first, mark = body[0], len(body) - 1   # new elements are added just before the closing section properties
     headings = [(p.style.name, p.text) for p in doc.paragraphs if p.style.name in ("Heading 1", "Heading 2")]
 
-    # ---- cover
+    # ---- cover: white and black on Illumio orange. The orange comes twice: a full-page picture
+    # behind the text (so the page is orange edge to edge) and orange cells (so the text stays
+    # readable in viewers that do not draw that picture).
+    # The picture hangs off a paragraph of the cover itself, not the page header: Word shows header
+    # content dimmed on screen, which would leave the page pale around the orange cells.
+    section = doc.sections[0]
+    holder = doc.add_paragraph()
+    holder.paragraph_format.space_after = Pt(0)
+    backdrop = holder.add_run()
+    backdrop.font.size = Pt(1)
+    backdrop.add_picture(cover_background(section.page_width / 914400, section.page_height / 914400),
+                         width=section.page_width, height=section.page_height)
+    behind_page(backdrop)
+
     cover, widths = fixed_table(doc, 1, [1])
-    cover.rows[0].height = Inches(3.7)
+    cover.rows[0].height = Inches(4.0)
     cell = cover.rows[0].cells[0]
-    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-    for n, (text, size, color, bold) in enumerate((("  illumio", 46, ORANGE, True), ("Enforcement Summary Report", 30, "#FFFFFF", True),
-                                                   ("Plan. Track. Enforce.", 13, "#C8D1E0", False))):
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.BOTTOM
+    for n, (text, size, color, bold) in enumerate((("  illumio", 46, COVER["title"], True), ("Enforcement Summary Report", 32, COVER["title"], True),
+                                                   ("Plan. Track. Enforce.", 14, COVER["text"], True))):
         par = write_cell(cell, "", widths[0]) if n == 0 else cell.add_paragraph()
         if n == 0:
-            par.add_run().add_picture(logo_png(), height=Inches(0.62))
+            par.add_run().add_picture(logo_png(COVER["title"]), height=Inches(0.62))
         run = par.add_run(text)
         run.font.size, run.bold = Pt(size), bold
         run.font.color.rgb = rgb(color)
-        par.paragraph_format.left_indent = Inches(0.45)
-        par.paragraph_format.space_after = Pt(4)
-    style_cell(cell, NAVY, bottom=(48, ORANGE))
-    doc.add_paragraph().paragraph_format.space_after = Pt(18)
-    form_fields(doc, details, height=0.4)
-    note(doc, "Generated by the Illumio Enforcement Tracker from the PCE data of the last sync.")
+        par.paragraph_format.left_indent = Inches(0.3)
+        par.paragraph_format.space_after = Pt(6 if n < 2 else 22)
+    style_cell(cell, COVER["page"], bottom=(36, COVER["accent"]))
+    gap = doc.add_paragraph()
+    gap.paragraph_format.space_after = Pt(14)
+
+    per_row = max(len(row) for row in details)
+    facts, widths = fixed_table(doc, per_row, [1] * per_row)
+    for n, items in enumerate(details):
+        row = facts.rows[0] if n == 0 else facts.add_row()
+        for i, cell in enumerate(row.cells):
+            label, value = (items[i] if isinstance(items[i], tuple) else (items[i], "")) if i < len(items) else ("", "")
+            par = write_cell(cell, label.upper(), widths[i], size=7.5, bold=True, color=COVER["label"])
+            par.paragraph_format.left_indent = Inches(0.3)
+            par.paragraph_format.space_before = Pt(8)
+            par.paragraph_format.space_after = Pt(2)
+            par = cell.add_paragraph()
+            par.paragraph_format.left_indent = Inches(0.3)
+            par.paragraph_format.space_after = Pt(8)
+            run = par.add_run(str(value) if value else "—")
+            run.font.size, run.bold = Pt(12), bool(value)
+            run.font.color.rgb = rgb(COVER["text"] if value else COVER["empty"])
+            style_cell(cell, COVER["page"], bottom=(4, COVER["line"]))
+    tail = doc.add_paragraph()
+    tail.paragraph_format.space_before = Pt(14)
+    tail.paragraph_format.left_indent = Inches(0.3)
+    run = tail.add_run("Generated by the Illumio Enforcement Tracker from the PCE data of the last sync.")
+    run.font.size, run.italic = Pt(8), True
+    run.font.color.rgb = rgb(COVER["label"])
 
     # ---- contents: a real Word field, so page numbers are filled in when the document is opened
     title = doc.add_paragraph()
@@ -1439,8 +1527,8 @@ def build_docx(data):
     note(doc, "Ratings are generated automatically from the data in this report. Action: something is not working or is overdue. "
               "Attention: work still to do. Good: nothing outstanding.")
 
-    # ---- 7. Consultant recommendations: what was entered on the Reports page, or an empty form
-    doc.add_heading("7. Consultant Recommendations", level=1)
+    # ---- 7. Recommendations: what the consultant entered on the Reports page, or an empty form
+    doc.add_heading("7. Recommendations", level=1)
     entered = any(consultant[k] for k in CONSULTANT_TEXTS) or any(consultant[k] for k in CONSULTANT_LISTS)
     if entered:
         lead(doc, "Observations and recommendations from the consultant's review of this deployment.")
@@ -1456,7 +1544,7 @@ def build_docx(data):
         doc.add_heading("Executive Summary", level=2)
         note(doc, "Overall state of the enforcement programme and the main message for stakeholders.")
         form_box(doc, 1.3)
-    doc.add_heading("Recommendations", level=2)
+    doc.add_heading("Recommended Actions", level=2)
     recs = consultant["recommendations"]
     if not recs:
         note(doc, "One row per recommendation. Area: for example VENs, Workloads, Labels, Policy, Traffic, Process. "
