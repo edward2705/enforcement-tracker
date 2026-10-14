@@ -489,15 +489,17 @@ def sync():
         ven = wl.get("ven") or {}
         c.execute(
             "INSERT OR REPLACE INTO workloads (pce_id, href, hostname, application_id, environment_id, managed, online, "
-            "enforcement_mode, ven_status, ven_version, ven_type, policy_sync_state, last_heartbeat, os, location, role) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "enforcement_mode, ven_status, ven_version, ven_type, policy_sync_state, last_heartbeat, os, location, role, "
+            "app_label, env_label, label_keys, os_detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (pid, wl.get("href", ""), wl.get("hostname") or wl.get("name") or "",
              app_ids.get((labels.get("app") or {}).get("href")), env_id.get((labels.get("env") or {}).get("href")),
              1 if wl.get("managed") else 0, 1 if wl.get("online") else 0, wl.get("enforcement_mode") or "",
              ven.get("status") or agent.get("status") or "", ven.get("version") or agent.get("agent_version") or "",
              ven.get("ven_type") or "",
              agent.get("security_policy_sync_state") or "", agent.get("last_heartbeat_on"), wl.get("os_id") or "",
-             (labels.get("loc") or {}).get("value", ""), (labels.get("role") or {}).get("value", "")))
+             (labels.get("loc") or {}).get("value", ""), (labels.get("role") or {}).get("value", ""),
+             (labels.get("app") or {}).get("value", ""), (labels.get("env") or {}).get("value", ""),
+             ",".join(sorted(k for k in labels if k)), wl.get("os_detail") or ""))
 
     for href, row in existing.items():
         if href not in seen and row["in_pce"]:

@@ -678,3 +678,60 @@ table.grid tbody tr { transition: background .1s; }
 .cr-state.dirty, .cr-state.saving { color: var(--accent); }
 .cr-state.error { color: #b02a2a; font-weight: 600; }
 @media (max-width: 1100px) { .cr-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); } .cr-sections { columns: 2; } }
+
+/* Reports > Policy and Blocked Traffic by Scope */
+.pt-basis { align-items: flex-end; column-gap: 20px; }
+.pt-basis .f { flex: 0 0 auto; min-width: 0; }   /* the switches take their own width instead of the 118px filter column */
+.pt-basis .btn-group .btn { white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
+.pt-basis .hint { flex: 1 1 260px; min-width: 220px; color: var(--ink-2); font-size: 12.5px; padding-bottom: 5px; }
+.pt-diff { display: block; font-size: 10.5px; font-weight: 600; line-height: 1.1; }   /* under the number it changes */
+.pt-diff.down { color: var(--st-fe); }
+.pt-diff.up { color: var(--danger); }
+.pt-pending { color: var(--st-ip); }
+.pt-allowed { display: flex; gap: 10px; align-items: center; padding: 10px 14px; margin-bottom: 16px; border-radius: 10px;
+  background: var(--st-fe-bg); color: var(--ink); border: 1px solid var(--line); }
+.pt-allowed .bi { color: var(--st-fe); font-size: 18px; }
+table.grid.pt-table tbody tr.pt-other td { color: var(--ink-3); font-style: italic; }
+table.grid.pt-table tbody tr.pt-total td { background: var(--surface-2); border-top: 2px solid var(--line); font-weight: 600; }
+.pt-notes { margin: 0; padding: 12px 16px 14px 32px; border-top: 1px solid var(--line); color: var(--ink-3); font-size: 12px; }
+.pt-notes li + li { margin-top: 4px; }
+.pt-direction { display: flex; gap: 10px; padding: 10px 16px 12px; border-bottom: 1px solid var(--line); font-size: 12.5px; color: var(--ink-2); }
+.pt-direction > .bi { color: var(--accent); font-size: 18px; margin-top: 1px; }
+.pt-direction > div { display: flex; flex-direction: column; gap: 3px; }
+.pt-direction span { padding: 1px 6px; margin-left: -6px; border-radius: 6px; }
+.pt-direction span.on { background: var(--accent-soft); color: var(--ink); }
+.pt-kpis .kpi .sub { white-space: normal; overflow: visible; line-height: 1.25; }
+/* Count headers wrap onto two lines so the table fits without scrolling sideways. */
+table.grid.pt-table th { white-space: normal; vertical-align: bottom; line-height: 1.25; }
+table.grid.pt-table th.text-end { min-width: 64px; max-width: 104px; }
+table.grid.pt-table th, table.grid.pt-table td { padding-left: 6px; padding-right: 6px; }
+table.grid.pt-table th:first-child { min-width: 160px; }
+table.grid.pt-table td.pt-scope { white-space: normal; min-width: 160px; max-width: 220px; overflow-wrap: anywhere; }
+table.grid.pt-table td.pt-scope span { display: block; font-size: 11.5px; }
+table.grid.pt-table td.pt-wrap { white-space: normal; min-width: 110px; }
+/* Scopes wider than one application and environment */
+table.grid.pt-table tbody tr.pt-kind-none td { background: var(--danger-bg); }
+table.grid.pt-table tbody tr.pt-kind-app td { background: var(--st-ip-bg); }
+.pt-badge { display: inline-block; margin-top: 3px; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 700; font-style: normal; }
+.pt-badge.none { background: var(--danger); color: #fff; }
+.pt-badge.app { background: var(--st-ip); color: #fff; }
+
+/* Reports > View Report: the Word document drawn in the page by docx-preview */
+body.no-scroll { overflow: hidden; }
+.word-viewer { position: fixed; inset: 0; z-index: 1080; display: flex; flex-direction: column; background: #5f6673; }
+.word-viewer-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 16px; background: var(--surface);
+  border-bottom: 1px solid var(--line); box-shadow: var(--shadow); }
+.word-viewer-bar > .bi { color: #2b579a; font-size: 18px; }
+.word-viewer-bar .muted { font-size: 12px; }
+.word-viewer-body { flex: 1; overflow: auto; position: relative; }
+.word-viewer-body .boot { position: absolute; inset: 0; color: #fff; }
+.word-viewer-body .boot .boot-text { color: #fff; }
+/* docx-preview draws each page as a white sheet; keep them centred on the grey desk, in light and dark mode. */
+.word-viewer-pages .docx-wrapper { background: transparent; padding: 24px 16px 40px; }
+.word-viewer-pages .docx-wrapper > section.docx { box-shadow: 0 2px 12px rgba(0, 0, 0, .35); margin-bottom: 24px; color: #111827; }
+@media (max-width: 720px) { .word-viewer-bar .muted { display: none; } }
+/* The report is written in Calibri; Carlito has the same metrics where Calibri is not installed. */
+.word-viewer-pages section.docx, .word-viewer-pages section.docx * { font-family: Calibri, Carlito, "Segoe UI", "Helvetica Neue", Arial, sans-serif !important; }
+/* No header or footer on the cover, as in Word. */
+.word-viewer-pages .docx-wrapper > section.docx:first-of-type > header,
+.word-viewer-pages .docx-wrapper > section.docx:first-of-type > footer { visibility: hidden; }

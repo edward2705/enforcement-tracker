@@ -3,8 +3,12 @@
 The tracker only pulls data. ReadOnlySession enforces that for every request this module can send:
 GET is allowed; anything that could change the PCE (POST, PUT, PATCH, DELETE) is refused before it
 leaves the machine. The one exception is the Explorer traffic query, which the PCE only offers as a
-POST: creating that query, and deleting the query this client created, are allowed and nothing else."""
+POST: creating that query, asking the PCE to work out the draft-policy decision for that query's flows
+(a PUT to the query's update_rules), and deleting the query this client created, are allowed and
+nothing else. None of them changes a workload, label, ruleset or rule. tests/test_pce_read_only.py
+also fails if any other module sends HTTP requests itself."""
 import datetime
+import json
 import os
 import re
 import tempfile
@@ -56,12 +60,21 @@ class PCEError(Exception):
 
 
 class ReadOnlySession(requests.Session):
-    """A requests session that cannot change anything in the PCE.
+    """A requests session that cannot change anything in the PCE: the tracker only reads.
 
-    Every request goes through request(), so the check also covers code that uses the session
-    directly. Allowed: GET to this PCE; POST to the org's traffic query collection (a read that the
-    PCE runs as a background query); DELETE of a traffic query this session created. Everything
-    else raises PCEError without being sent."""
+    Every request is checked in send(), the one place requests always passes through (also for code
+    that prepares a request itself), before anything leaves the machine. Allowed:
+      - GET to this PCE, with no body;
+      - POST of an Explorer traffic query to the org's async_queries - the only way the PCE answers
+        traffic questions - with a body that holds query fields and nothing else;
+      - PUT to update_rules of a traffic query this session created, with an empty body (it judges that
+        query's flows against draft policy and stores the answer in the query result only);
+      - DELETE of a traffic query this session created.
+    Workloads, labels, rulesets, rules and every other PCE object can only be read. Everything else
+    raises PCEError unsent; redirects are never followed."""
+
+    QUERY_FIELDS = {"query_name", "sources", "destinations", "services", "sources_destinations_query_op",
+                    "start_date", "end_date", "policy_decisions", "max_results"}
 
     def __init__(self, host, org):
         super().__init__()
@@ -69,18 +82,32 @@ class ReadOnlySession(requests.Session):
         self.query_path = f"/api/v2/orgs/{org}/traffic_flows/async_queries"
         self.own_queries = set()                       # paths of the traffic queries created by this session
 
-    def request(self, method, url, *args, **kwargs):
-        method = (method or "").upper()
-        target = urlsplit(url)
+    def send(self, request, **kwargs):
+        self.check(request)
+        kwargs["allow_redirects"] = False   # a redirect would be a second request this check never saw
+        return super().send(request, **kwargs)
+
+    def check(self, request):
+        method = (request.method or "").upper()
+        target = urlsplit(request.url)
         path = target.path.rstrip("/")
         if target.scheme != "https" or target.netloc.lower() != self.host:
-            raise PCEError(f"Blocked {method} to {target.netloc or url}: requests only go to the configured PCE over HTTPS")
-        allowed = (method == "GET"
-                   or (method == "POST" and path == self.query_path)
-                   or (method == "DELETE" and path in self.own_queries))
+            raise PCEError(f"Blocked {method} to {target.netloc or request.url}: requests only go to the configured PCE over HTTPS")
+        body = request.body
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", "replace")
+        try:
+            data = json.loads(body) if body else None
+        except ValueError:
+            data = False   # not JSON: never allowed as a body
+        allowed = ((method == "GET" and data is None)
+                   or (method == "POST" and path == self.query_path and isinstance(data, dict) and data
+                       and set(data) <= self.QUERY_FIELDS)
+                   or (method == "PUT" and path.endswith("/update_rules") and path[:-len("/update_rules")] in self.own_queries
+                       and data in (None, {}))
+                   or (method == "DELETE" and path in self.own_queries and data is None))
         if not allowed:
             raise PCEError(f"Blocked {method} {target.path}: the tracker only reads from the PCE and never changes it")
-        return super().request(method, url, *args, **kwargs)
 
 
 class PCE:
@@ -149,12 +176,17 @@ class PCE:
             if time.time() > deadline:
                 raise PCEError(f"Timed out waiting for the PCE async job for {path}")
 
-    def traffic_flows(self, days, decisions, max_results=100000, max_wait=180):
+    def traffic_flows(self, days, decisions, max_results=100000, max_wait=180, draft=False):
         """Flows with the given policy decisions over the last `days` days, from an Explorer async query.
 
         This is the one request that is not a GET: the PCE only answers traffic questions through a
         query it runs in the background. It reads traffic and changes no workload, label or policy;
-        the query is deleted again once its result is downloaded (see ReadOnlySession)."""
+        the query is deleted again once its result is downloaded (see ReadOnlySession).
+
+        With draft=True the PCE also evaluates each flow against the draft (not yet provisioned)
+        rules, as Explorer's "Draft" view does, and every flow gets a draft_policy_decision. Returns
+        (flows, draft_error): draft_error is "" when draft decisions were added (or not asked for),
+        otherwise why not; the reported decisions are returned either way."""
         end = datetime.datetime.now(datetime.timezone.utc)
         body = {
             "query_name": "enforcement-tracker blocked traffic",
@@ -165,21 +197,42 @@ class PCE:
             "policy_decisions": list(decisions), "max_results": max_results,
         }
         job = self._check(self.session.post(self.base + "/traffic_flows/async_queries", json=body, timeout=30)).json()["href"]
-        self.session.own_queries.add(urlsplit(self.root + job).path)   # the only thing this client may delete
+        self.session.own_queries.add(urlsplit(self.root + job).path)   # the only query this client may update or delete
         try:
-            deadline = time.time() + max_wait
-            while True:
-                status = self._check(self.session.get(self.root + job, timeout=30)).json().get("status")
-                if status == "completed":
-                    break
-                if status in ("failed", "cancelled", "killed"):
-                    raise PCEError(f"PCE traffic query {status}")
-                if time.time() > deadline:
-                    raise PCEError("Timed out waiting for the PCE traffic query")
-                time.sleep(2)
-            return self._check(self.session.get(self.root + job + "/download", timeout=180)).json()
+            self._wait_query(job, max_wait, lambda q: True)
+            draft_error = ""
+            if draft:
+                try:
+                    self._check(self.session.put(self.root + job + "/update_rules", json={}, timeout=30))
+                    self._wait_query(job, max_wait, lambda q: query_rules_status(q) == "completed")
+                except (PCEError, requests.RequestException) as err:
+                    draft_error = str(err) if isinstance(err, PCEError) else f"PCE request failed ({type(err).__name__})"
+            flows = self._check(self.session.get(self.root + job + "/download", timeout=180)).json()
+            if draft and not draft_error and flows and not any("draft_policy_decision" in f for f in flows):
+                draft_error = "the PCE returned no draft policy decisions"
+            return flows, draft_error
         finally:
             try:
                 self.session.delete(self.root + job, timeout=30)
             except requests.RequestException:
                 pass
+
+    def _wait_query(self, job, max_wait, ready):
+        deadline = time.time() + max_wait
+        while True:
+            query = self._check(self.session.get(self.root + job, timeout=30)).json()
+            status = query.get("status")
+            if status == "completed" and ready(query):
+                return query
+            if status in ("failed", "cancelled", "killed") or query_rules_status(query) == "failed":
+                raise PCEError(f"PCE traffic query {status if status != 'completed' else 'draft policy update failed'}")
+            if time.time() > deadline:
+                raise PCEError("Timed out waiting for the PCE traffic query")
+            time.sleep(2)
+
+
+def query_rules_status(query):
+    """Progress of a traffic query's draft-policy update: the PCE reports it as "rules", either a
+    status string or an object with a status."""
+    rules = query.get("rules")
+    return (rules.get("status") if isinstance(rules, dict) else rules) or ""

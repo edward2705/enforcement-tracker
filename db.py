@@ -139,8 +139,12 @@ CREATE TABLE IF NOT EXISTS workloads (          -- snapshot of the PCE's workloa
     policy_sync_state TEXT    NOT NULL DEFAULT '',
     last_heartbeat    TEXT,
     os                TEXT    NOT NULL DEFAULT '',
+    os_detail         TEXT    NOT NULL DEFAULT '',   -- e.g. "... (Windows 10 Enterprise LTSC 2024)"
     location          TEXT    NOT NULL DEFAULT '',
     role              TEXT    NOT NULL DEFAULT '',
+    app_label         TEXT    NOT NULL DEFAULT '',   -- value of the app label, tracked or not
+    env_label         TEXT    NOT NULL DEFAULT '',
+    label_keys        TEXT,                          -- label types on the workload, comma-separated ("": no labels, NULL: not read yet)
     UNIQUE (pce_id, href)
 );
 CREATE INDEX IF NOT EXISTS idx_workloads_application ON workloads(application_id);
@@ -163,17 +167,26 @@ CREATE TABLE IF NOT EXISTS rule_set_scopes (    -- one row per application and e
     rule_set_id    INTEGER NOT NULL REFERENCES rule_sets(id)    ON DELETE CASCADE,
     scope          TEXT    NOT NULL,                                        -- the scope as written in the PCE
     application_id INTEGER REFERENCES applications(id) ON DELETE CASCADE,  -- NULL: the scope names no tracked application
-    environment_id INTEGER REFERENCES environments(id) ON DELETE CASCADE   -- NULL: every environment
+    environment_id INTEGER REFERENCES environments(id) ON DELETE CASCADE,  -- NULL: every environment
+    scope_type     TEXT    NOT NULL DEFAULT ''   -- none (scopeless), app (application only), app_env, other; '' = not read yet
 );
 CREATE TABLE IF NOT EXISTS traffic_summaries (  -- blocked and potentially blocked flows seen by the PCE
     id                              INTEGER PRIMARY KEY,
     pce_id                          INTEGER NOT NULL REFERENCES pces(id) ON DELETE CASCADE,
     application_id                  INTEGER REFERENCES applications(id) ON DELETE CASCADE,  -- NULL: the whole PCE
     environment_id                  INTEGER REFERENCES environments(id) ON DELETE CASCADE,  -- NULL: the whole application
+    direction                       TEXT    NOT NULL DEFAULT 'all' CHECK (direction IN ('all', 'in', 'out')),  -- to the scope
     potentially_blocked_flows       INTEGER NOT NULL DEFAULT 0 CHECK (potentially_blocked_flows >= 0),
     potentially_blocked_connections INTEGER NOT NULL DEFAULT 0 CHECK (potentially_blocked_connections >= 0),
     blocked_flows                   INTEGER NOT NULL DEFAULT 0 CHECK (blocked_flows >= 0),
-    blocked_connections             INTEGER NOT NULL DEFAULT 0 CHECK (blocked_connections >= 0)
+    blocked_connections             INTEGER NOT NULL DEFAULT 0 CHECK (blocked_connections >= 0),
+    -- The same flows judged against the draft rules: still potentially blocked / blocked, or allowed once provisioned.
+    draft_potentially_blocked_flows       INTEGER NOT NULL DEFAULT 0,
+    draft_potentially_blocked_connections INTEGER NOT NULL DEFAULT 0,
+    draft_blocked_flows                   INTEGER NOT NULL DEFAULT 0,
+    draft_blocked_connections             INTEGER NOT NULL DEFAULT 0,
+    draft_allowed_flows                   INTEGER NOT NULL DEFAULT 0,
+    draft_allowed_connections             INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS labels (             -- every label in the PCE and where it is used
     id             INTEGER PRIMARY KEY,
@@ -345,8 +358,22 @@ def init():
     for col, ddl in (("priority_id", "INTEGER REFERENCES priorities(id) ON DELETE RESTRICT"), ("start_date", "TEXT"), ("end_date", "TEXT")):
         if col not in have:
             con.execute(f"ALTER TABLE application_environments ADD COLUMN {col} {ddl}")
-    if "ven_type" not in {r["name"] for r in con.execute("PRAGMA table_info(workloads)")}:
-        con.execute("ALTER TABLE workloads ADD COLUMN ven_type TEXT NOT NULL DEFAULT ''")
+    have = {r["name"] for r in con.execute("PRAGMA table_info(workloads)")}
+    for col in ("ven_type", "app_label", "env_label", "os_detail"):
+        if col not in have:
+            con.execute(f"ALTER TABLE workloads ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+    if "label_keys" not in have:
+        con.execute("ALTER TABLE workloads ADD COLUMN label_keys TEXT")
+    if "scope_type" not in {r["name"] for r in con.execute("PRAGMA table_info(rule_set_scopes)")}:
+        con.execute("ALTER TABLE rule_set_scopes ADD COLUMN scope_type TEXT NOT NULL DEFAULT ''")
+    have = {r["name"] for r in con.execute("PRAGMA table_info(traffic_summaries)")}
+    if "direction" not in have:
+        con.execute("ALTER TABLE traffic_summaries ADD COLUMN direction TEXT NOT NULL DEFAULT 'all' "
+                    "CHECK (direction IN ('all', 'in', 'out'))")
+    for col in ("draft_potentially_blocked_flows", "draft_potentially_blocked_connections", "draft_blocked_flows",
+                "draft_blocked_connections", "draft_allowed_flows", "draft_allowed_connections"):
+        if col not in have:
+            con.execute(f"ALTER TABLE traffic_summaries ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
     if "application_environment_id" not in {r["name"] for r in con.execute("PRAGMA table_info(comments)")}:
         con.execute("ALTER TABLE comments ADD COLUMN application_environment_id INTEGER "
                     "REFERENCES application_environments(id) ON DELETE CASCADE")

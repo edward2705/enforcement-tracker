@@ -11,9 +11,20 @@ TRAFFIC_DAYS = 30          # how far back blocked traffic is counted, unless cha
 TRAFFIC_DAYS_RANGE = (1, 365)
 TRAFFIC_MAX_RESULTS = 100000
 DECISIONS = ("potentially_blocked", "blocked")
+# Explorer's terms: a connection is one source, destination, port and protocol; its flows are the number
+# of times it was seen (Explorer's "Flows" column, the PCE's num_connections).
 TRAFFIC_COLS = ("potentially_blocked_flows", "potentially_blocked_connections", "blocked_flows", "blocked_connections")
+# The same flows judged against the draft rules (Explorer's "Draft" view). Allowed: provisioning the draft would allow them.
+DRAFT_COLS = tuple("draft_" + k for k in TRAFFIC_COLS) + ("draft_allowed_flows", "draft_allowed_connections")
+# A scope's traffic in each direction: "in" where the scope is the destination, "out" where it is the
+# source, "all" either way. A flow inside one scope is both inbound and outbound to it.
+DIRECTIONS = ("all", "in", "out")
 KEY_ORDER = {"app": 0, "env": 1, "loc": 2}
 ALL = {"app": "All Applications", "env": "All Environments"}
+# What a ruleset scope narrows to. "none": no labels at all, so the rules apply to every workload in the
+# PCE (scopeless); "app": an application but no environment; "app_env": both; "other": no application
+# (only environment or other labels).
+SCOPE_TYPES = {"none": "Scopeless", "app": "Application only", "app_env": "Application + Environment", "other": "No application"}
 
 
 def object_id(href):
@@ -48,8 +59,8 @@ def traffic_days(c):
 
 
 def read_scope(entries, labels, groups):
-    """One ruleset scope -> (text as the PCE shows it, app label hrefs or None, env label hrefs or None).
-    None means the scope does not narrow that dimension to particular labels."""
+    """One ruleset scope -> (text as the PCE shows it, app label hrefs or None, env label hrefs or None,
+    scope type - see SCOPE_TYPES). None means the scope does not narrow that dimension to particular labels."""
     named = {}
     parts = []
     for entry in entries:
@@ -64,10 +75,13 @@ def read_scope(entries, labels, groups):
         elif key in ("app", "env"):
             named[key] = named.get(key, set()) | hrefs
         parts.append((KEY_ORDER.get(key, 3), key, name))
+    present = {k for _o, k, _n in parts}   # label types the scope names, before "All ..." fills the gaps
     for key, text in ALL.items():
         if not any(k == key for _o, k, _n in parts):
             parts.append((KEY_ORDER[key], key, text))
-    return " | ".join(name for _o, _k, name in sorted(parts)), named.get("app"), named.get("env")
+    kind = ("none" if not entries else "other" if "app" not in present
+            else "app_env" if "env" in present else "app")
+    return " | ".join(name for _o, _k, name in sorted(parts)), named.get("app"), named.get("env"), kind
 
 
 def sync_rules(client, c, pid):
@@ -91,19 +105,30 @@ def sync_rules(client, c, pid):
             (pid, href, src.get("name") or "", 1 if src.get("enabled", True) else 0, len(drafted), len(rules(a)) if a else 0, pending),
         ).lastrowid
         for entries in src.get("scopes") or [[]]:
-            text, apps, envs = read_scope(entries, labels, groups)
+            text, apps, envs, kind = read_scope(entries, labels, groups)
             app_ids = sorted({app_id[h] for h in apps or () if h in app_id}) or [None]
             env_ids = sorted({env_id[h] for h in envs or () if h in env_id}) or [None]
             for aid in app_ids:
                 for eid in env_ids if aid else [None]:
-                    c.execute("INSERT INTO rule_set_scopes (rule_set_id, scope, application_id, environment_id) VALUES (?,?,?,?)",
-                              (rid, text, aid, eid))
+                    c.execute("INSERT INTO rule_set_scopes (rule_set_id, scope, application_id, environment_id, scope_type) "
+                              "VALUES (?,?,?,?,?)", (rid, text, aid, eid, kind))
+
+
+def draft_bucket(decision):
+    """potentially_blocked, blocked or allowed for a draft_policy_decision; the PCE adds qualifiers
+    such as "blocked_by_boundary" or "allowed_across_boundary"."""
+    for bucket in ("potentially_blocked", "blocked", "allowed"):
+        if (decision or "").startswith(bucket):
+            return bucket
+    return None
 
 
 def sync_traffic(client, c, pid):
-    """Count blocked and potentially blocked flows for the whole PCE, per application and per
-    application and environment. A flow counts for the scope of its source and of its destination."""
-    flows = client.traffic_flows(traffic_days(c), DECISIONS, TRAFFIC_MAX_RESULTS)
+    """Count blocked and potentially blocked connections and their flows for the whole PCE, per
+    application and per application and environment, inbound and outbound. Each is counted by the
+    decision the VENs reported under the provisioned rules, and by the PCE's decision under the draft
+    rules. Returns (truncated, draft_error)."""
+    flows, draft_error = client.traffic_flows(traffic_days(c), DECISIONS, TRAFFIC_MAX_RESULTS, draft=True)
     app_id = {r["label_href"]: r["id"] for r in c.execute("SELECT id, label_href FROM applications WHERE pce_id = ?", (pid,))}
     env_id = {r["label_href"]: r["id"] for r in c.execute("SELECT id, label_href FROM environments WHERE pce_id = ?", (pid,))}
 
@@ -112,35 +137,52 @@ def sync_traffic(client, c, pid):
         lab = {l.get("key"): l.get("href") for l in wl.get("labels") or []}
         return wl.get("href") or side.get("ip") or "", app_id.get(lab.get("app")), env_id.get(lab.get("env"))
 
-    # Both ends of a flow can report it; keep one copy with the higher connection count.
+    # The PCE returns several records for one connection (from the source and the destination VEN,
+    # and split by time range and boundary decision). Explorer shows one row per connection with the
+    # flows of all its records added up, so the same is done here.
     unique = {}
     for f in flows:
         if f.get("policy_decision") not in DECISIONS:
             continue
         src, dst, svc = end(f.get("src") or {}), end(f.get("dst") or {}), f.get("service") or {}
         key = (src[0], dst[0], svc.get("port"), svc.get("proto"), f["policy_decision"])
-        seen = unique.get(key)
-        if seen is None or (f.get("num_connections") or 0) > seen[2]:
-            unique[key] = (src, dst, f.get("num_connections") or 0)
+        entry = unique.setdefault(key, {"src": src, "dst": dst, "flows": 0, "draft": None, "biggest": -1})
+        count = f.get("num_connections") or 0
+        entry["flows"] += count
+        if count > entry["biggest"]:
+            # The draft decision of the busiest record; one the PCE cannot judge against the draft
+            # ("unknown") keeps the decision it was reported with.
+            entry["biggest"] = count
+            entry["draft"] = draft_bucket(f.get("draft_policy_decision")) or (f["policy_decision"] if "draft_policy_decision" in f else None)
+
+    def scopes_of(side):
+        """The application and the application-and-environment scope of one end of a flow."""
+        _href, aid, eid = side
+        if not aid:
+            return set()
+        return {(aid, None), (aid, eid)} if eid else {(aid, None)}
 
     totals = {}
-    for (_s, _d, _port, _proto, decision), (src, dst, connections) in unique.items():
-        scopes = {(None, None)}
-        for _href, aid, eid in (src, dst):
-            if aid:
-                scopes.add((aid, None))
-                if eid:
-                    scopes.add((aid, eid))
-        for scope in scopes:
-            row = totals.setdefault(scope, dict.fromkeys(TRAFFIC_COLS, 0))
-            row[f"{decision}_flows"] += 1
-            row[f"{decision}_connections"] += connections
-    totals.setdefault((None, None), dict.fromkeys(TRAFFIC_COLS, 0))
+    blank = dict.fromkeys(TRAFFIC_COLS + DRAFT_COLS, 0)
+    for (_s, _d, _port, _proto, decision), entry in unique.items():
+        src, dst, draft, seen = entry["src"], entry["dst"], entry["draft"], entry["flows"]
+        inbound, outbound = scopes_of(dst), scopes_of(src)
+        keys = ({(None, None, "all")} | {(*sc, "all") for sc in inbound | outbound}
+                | {(*sc, "in") for sc in inbound} | {(*sc, "out") for sc in outbound})
+        for key in keys:
+            row = totals.setdefault(key, dict(blank))
+            row[f"{decision}_connections"] += 1
+            row[f"{decision}_flows"] += seen
+            if draft:
+                row[f"draft_{draft}_connections"] += 1
+                row[f"draft_{draft}_flows"] += seen
+    totals.setdefault((None, None, "all"), dict(blank))
+    cols = TRAFFIC_COLS + DRAFT_COLS
     c.execute("DELETE FROM traffic_summaries WHERE pce_id = ?", (pid,))
-    for (aid, eid), row in totals.items():
-        c.execute(f"INSERT INTO traffic_summaries (pce_id, application_id, environment_id, {', '.join(TRAFFIC_COLS)}) "
-                  "VALUES (?,?,?,?,?,?,?)", (pid, aid, eid, *[row[k] for k in TRAFFIC_COLS]))
-    return len(flows) >= TRAFFIC_MAX_RESULTS
+    for (aid, eid, direction), row in totals.items():
+        c.execute(f"INSERT INTO traffic_summaries (pce_id, application_id, environment_id, direction, {', '.join(cols)}) "
+                  f"VALUES (?,?,?,?{',?' * len(cols)})", (pid, aid, eid, direction, *[row[k] for k in cols]))
+    return len(flows) >= TRAFFIC_MAX_RESULTS, draft_error
 
 
 def sync_labels(client, c, pid, workloads):
@@ -178,12 +220,18 @@ def sync_pce(client, _c, _pid):
 
 
 def sync(client, c, pid, ts, workloads):
-    """Refresh both snapshots. A part the PCE refuses or cannot answer keeps its previous snapshot and
-    is reported as a warning, so the rest of the sync still goes through. Each part asks the PCE first
-    and commits on its own, so the database is not held locked while the traffic query runs."""
+    """Refresh the snapshots. Traffic is cleared first, every time: the stored counts are only ever the
+    ones this sync read, so a traffic query that fails leaves no traffic rather than old numbers. Any
+    other part the PCE refuses or cannot answer keeps its previous snapshot. Failures are reported as
+    warnings so the rest of the sync still goes through. Each part asks the PCE first and commits on its
+    own, so the database is not held locked while the traffic query runs."""
     info = json.loads(db.get_setting(c, f"policy_snapshot:{pid}", "{}"))
     days = traffic_days(c)   # read once: the period recorded with the snapshot is the one that was queried
     warnings = []
+    c.execute("DELETE FROM traffic_summaries WHERE pce_id = ?", (pid,))
+    info["traffic"] = {"cleared_at": ts}
+    db.set_setting(c, f"policy_snapshot:{pid}", json.dumps(info))
+    c.commit()
     parts = (("rules", "rulesets", sync_rules), ("traffic", "blocked traffic", sync_traffic),
              ("labels", "labels", lambda *args: sync_labels(*args, workloads)), ("pce", "PCE details", sync_pce))
     for part, label, run in parts:
@@ -191,13 +239,18 @@ def sync(client, c, pid, ts, workloads):
             result = run(client, c, pid)
             info[part] = {"synced_at": ts, "error": ""}
             if part == "traffic":
-                info[part].update(days=days, truncated=bool(result))
+                truncated, draft_error = result
+                info[part].update(days=days, truncated=bool(truncated), draft=not draft_error, draft_error=draft_error)
+                if draft_error:
+                    warnings.append(f"Could not read draft policy decisions: {draft_error}. Counts by provisioned rules are up to date.")
             elif part == "pce":
                 info[part].update(result)
         except (pcelib.PCEError, requests.RequestException, ValueError, KeyError) as err:
             c.rollback()
             message = str(err) if isinstance(err, pcelib.PCEError) else f"PCE request failed ({type(err).__name__})"
             info[part] = {**info.get(part, {}), "error": message}
+            if part == "traffic":
+                message += "; traffic was cleared and shows no counts until the next sync reads it"
             warnings.append(f"Could not read {label}: {message}")
         db.set_setting(c, f"policy_snapshot:{pid}", json.dumps(info))
         c.commit()
@@ -207,12 +260,15 @@ def sync(client, c, pid, ts, workloads):
 def summary(c, pid, apps):
     """What the reports show: one row per tracked application and environment (as on the Dashboard),
     then the ruleset scopes that name no tracked application, and PCE-wide totals."""
-    by_scope, names = {}, {}
-    for r in c.execute("SELECT rs.*, s.scope, s.application_id, s.environment_id FROM rule_set_scopes s "
+    by_scope, names, kinds, app_only = {}, {}, {}, {}
+    for r in c.execute("SELECT rs.*, s.scope, s.application_id, s.environment_id, s.scope_type FROM rule_set_scopes s "
                        "JOIN rule_sets rs ON rs.id = s.rule_set_id WHERE rs.pce_id = ? ORDER BY rs.name COLLATE NOCASE", (pid,)):
         by_scope.setdefault((r["application_id"], r["environment_id"]), {})[r["id"]] = r
         names.setdefault(r["id"], set()).add(r["scope"])
-    traffic = {(r["application_id"], r["environment_id"]): r for r in
+        kinds[r["scope"]] = r["scope_type"]
+        if r["application_id"] and r["scope_type"] == "app":
+            app_only.setdefault(r["application_id"], {})[r["id"]] = r
+    traffic = {(r["application_id"], r["environment_id"], r["direction"]): r for r in
                c.execute("SELECT * FROM traffic_summaries WHERE pce_id = ?", (pid,))}
 
     def rules_of(sets):
@@ -221,15 +277,25 @@ def summary(c, pid, apps):
                 "rules_draft": sum(r["rules_draft"] for r in sets), "rules_active": sum(r["rules_active"] for r in sets),
                 "rules_pending": sum(r["rules_pending"] for r in sets)}
 
-    def traffic_of(key):
+    def counts(key):
         row = traffic.get(key)
-        return {k: row[k] if row else 0 for k in TRAFFIC_COLS}
+        return {k: row[k] if row else 0 for k in TRAFFIC_COLS + DRAFT_COLS}
+
+    def traffic_of(scope):
+        """The counts either way at the top level, and inbound and outbound under "in" and "out"."""
+        return {**counts((*scope, "all")), "in": counts((*scope, "in")), "out": counts((*scope, "out"))}
 
     rows = []
     for a in apps:
         if a["excluded"]:
             continue
         envs = [e for e in a["environments"] if not e["excluded"]]
+        if envs and a["id"] in app_only:
+            # Rulesets scoped to the application alone (no environment): a row of their own, so the
+            # report can show them apart. Their rules also count in each environment's row below.
+            rows.append({"application": a["name"], "environment": "", "tracked": True, "scope_type": "app",
+                         "scope": f"{a['name']} | {ALL['env']}", "status": a["status"], "pce_state": a["pce_state"],
+                         **rules_of(app_only[a["id"]]), **traffic_of((a["id"], None))})
         for e in envs or [None]:
             # Rulesets scoped to this application: for this environment, or for all of its environments.
             sets = dict(by_scope.get((a["id"], None), {}))
@@ -240,6 +306,7 @@ def summary(c, pid, apps):
                     if aid == a["id"]:
                         sets.update(more)
             rows.append({"application": a["name"], "environment": e["name"] if e else "", "tracked": True,
+                         "scope_type": "app_env" if e or a["id"] not in app_only else "app",
                          "scope": f"{a['name']} | {e['name'] if e else ALL['env']}",
                          "status": (e or a)["status"], "pce_state": (e or a)["pce_state"],
                          **rules_of(sets), **traffic_of((a["id"], e["environment_id"] if e else None))})
@@ -247,10 +314,15 @@ def summary(c, pid, apps):
     for rid, r in by_scope.get((None, None), {}).items():
         for text in names[rid]:
             other.setdefault(text, {})[rid] = r
-    for text in sorted(other):
+    # Scopeless rulesets first: their rules apply to every workload in the PCE.
+    for text in sorted(other, key=lambda t: (kinds.get(t) != "none", t.lower())):
         rows.append({"application": "", "environment": "", "tracked": False, "scope": text, "status": "", "pce_state": "",
-                     **rules_of(other[text]), **dict.fromkeys(TRAFFIC_COLS)})
+                     "scope_type": kinds.get(text) or "",   # "": synced before scope types were recorded
+                     **rules_of(other[text]), **dict.fromkeys(TRAFFIC_COLS + DRAFT_COLS), "in": None, "out": None})
     every = c.execute("SELECT COUNT(*) AS rulesets, COALESCE(SUM(rules_draft), 0) AS rules_draft, COALESCE(SUM(rules_active), 0) "
                       "AS rules_active, COALESCE(SUM(rules_pending), 0) AS rules_pending FROM rule_sets WHERE pce_id = ?", (pid,)).fetchone()
-    return {"rows": rows, "totals": {**dict(every), **traffic_of((None, None))},
+    flagged = {kind: sorted({r["name"] for sets in by_scope.values() for r in sets.values() if r["scope_type"] == kind}, key=str.lower)
+               for kind in ("none", "app")}
+    return {"rows": rows, "totals": {**dict(every), **counts((None, None, "all"))},
+            "scopeless": flagged["none"], "app_only": flagged["app"],
             "info": json.loads(db.get_setting(c, f"policy_snapshot:{pid}", "{}"))}

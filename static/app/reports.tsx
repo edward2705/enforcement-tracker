@@ -108,6 +108,7 @@ function EnforcementSummary() {
   const [project, setProject] = useState('');
   const [f, setF] = useState({ app: '', env: '', status: '', priority: '', ps: '', pm: '', owner: '' });
   const [selected, setSelected] = useState(null as string | null);
+  const [viewing, setViewing] = useState(false);
   useEffect(() => { api('GET', '/api/timeline').then(setTl).catch((e: any) => toast(e.message, 'err')); }, [data.settings.last_sync]);
   const noFold = useMemo(() => new Set<string>(), []);
   const projects = project ? [Number(project)] : [];
@@ -166,6 +167,9 @@ function EnforcementSummary() {
             {(tl ? tl.projects : []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
         </div>
+        <button className="btn btn-light no-print" onClick={() => setViewing(true)} title="Show the Word report here">
+          <Icon name="bi-eye" /> View Report
+        </button>
         <a className="btn btn-light no-print" href={excelUrl.replace('.xlsx', '.docx')} title="Download this report as a Word document">
           <Icon name="bi-file-earmark-word" /> Download Word
         </a>
@@ -174,6 +178,7 @@ function EnforcementSummary() {
         </a>
         <button className="btn btn-outline-light no-print" onClick={() => window.print()}><Icon name="bi-printer" /> Print</button>
       </section>
+      {viewing && <WordViewer url={excelUrl.replace('.xlsx', '.docx')} onClose={() => setViewing(false)} />}
 
       <div className="kpis six">
         <Kpi icon="bi-box-seam" tone="accent" label="Total Applications" value={total} />
@@ -262,6 +267,73 @@ function EnforcementSummary() {
   );
 }
 
+// View the Word report in the app: the same .docx the download gives, drawn page by page in the
+// browser by docx-preview, so it looks the same as the downloaded file. The library is only loaded
+// the first time the viewer opens.
+const scriptsLoaded: Record<string, Promise<void>> = {};
+function loadScript(src: string) {
+  if (!scriptsLoaded[src]) {
+    scriptsLoaded[src] = new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = src;
+      el.onload = () => resolve();
+      el.onerror = () => { delete scriptsLoaded[src]; reject(new Error(`Could not load ${src}`)); };
+      document.head.appendChild(el);
+    });
+  }
+  return scriptsLoaded[src];
+}
+
+function WordViewer({ url, onClose }: { url: string; onClose: () => void }) {
+  const { toast } = useStore();
+  const pages = useRef(null as HTMLDivElement | null);
+  const [state, setState] = useState('loading' as 'loading' | 'ready' | 'error');
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      await loadScript('/static/vendor/jszip.min.js');          // docx-preview reads the .docx with JSZip
+      await loadScript('/static/vendor/docx-preview.min.js');
+      // preview=1: the same report, minus what browsers cannot draw (see build_docx).
+      const res = await fetch(url + (url.includes('?') ? '&' : '?') + 'preview=1', { cache: 'no-cache' });
+      if (!res.ok) throw new Error(`The report could not be built (HTTP ${res.status})`);
+      const file = await res.blob();
+      if (!live || !pages.current) return;
+      pages.current.textContent = '';
+      await (window as any).docx.renderAsync(file, pages.current, undefined, {
+        className: 'docx', inWrapper: true, breakPages: true, ignoreWidth: false, ignoreHeight: false,
+        ignoreLastRenderedPageBreak: true, renderHeaders: true, renderFooters: true, useBase64URL: true, experimental: true,
+      });
+      if (live) setState('ready');
+    })().catch((e: any) => { if (live) { setState('error'); setError(e.message); toast(e.message, 'err'); } });
+    return () => { live = false; };
+  }, [url]);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', key);
+    document.body.classList.add('no-scroll');
+    return () => { document.removeEventListener('keydown', key); document.body.classList.remove('no-scroll'); };
+  }, []);
+  return (
+    <div className="word-viewer" role="dialog" aria-modal="true" aria-label="Enforcement Summary Report">
+      <div className="word-viewer-bar">
+        <Icon name="bi-file-earmark-word" />
+        <b>Illumio Enforcement Summary Report</b>
+        <span className="muted">The Word report as a preview. Word sets the final page breaks and page numbers.</span>
+        <span className="ms-auto d-flex gap-2">
+          <a className="btn btn-light btn-sm" href={url}><Icon name="bi-download" /> Download Word</a>
+          <button className="btn btn-primary btn-sm" onClick={onClose} autoFocus><Icon name="bi-x-lg" /> Close</button>
+        </span>
+      </div>
+      <div className="word-viewer-body">
+        {state === 'loading' && <div className="boot"><div className="spinner-border text-primary" role="status" /><div className="boot-text">Building the report…</div></div>}
+        {state === 'error' && <Empty icon="bi-exclamation-triangle" title="The report could not be shown">{error}</Empty>}
+        <div ref={pages} className="word-viewer-pages" />
+      </div>
+    </div>
+  );
+}
+
 // Reports > Enforcement Summary Report: the Word document for the customer, and the recommendations
 // the consultant adds to it. What is typed here is saved with the tracker and printed in the document.
 interface RowColumn { key: string; label: string; width: string; kind?: 'text' | 'long' | 'date' | 'select'; options?: string[]; }
@@ -287,7 +359,7 @@ const ENGAGEMENT_FIELDS: { key: string; label: string; placeholder?: string }[] 
   { key: 'next_review_date', label: 'Next review date', placeholder: 'e.g. Nov 30, 2026' },
   { key: 'document_version', label: 'Document version', placeholder: 'e.g. 1.0' },
 ];
-const REPORT_SECTIONS = ['Cover page and table of contents', 'Executive Summary', '1. PCE Information Summary', '2. VENs & Workloads',
+const REPORT_SECTIONS = ['Cover page and table of contents', 'Executive Summary', '1. PCE Information Summary', '2. VENs & Workloads (with unsupported VENs and workloads missing labels)',
   '3. Label Summary', '4. Policy and Blocked Traffic by Scope', '5. Application Enforcement Status', '6. Assessment Summary',
   '7. Recommendations'];
 
@@ -338,6 +410,7 @@ function SummaryReport() {
   const [state, setState] = useState('saved' as 'saved' | 'dirty' | 'saving' | 'error');
   const [tl, setTl] = useState(null as TimelineData | null);
   const [project, setProject] = useState('');
+  const [viewing, setViewing] = useState(false);
   const latest = useRef(null as any);
   const dirty = useRef(false);
   const timer = useRef(0 as any);
@@ -373,9 +446,15 @@ function SummaryReport() {
     clearTimeout(timer.current);
     timer.current = setTimeout(push, 1200);
   };
+  const docxUrl = '/api/reports/enforcement-summary.docx' + (project ? `?projects=${project}` : '');
   const download = async () => {
     clearTimeout(timer.current);
-    if (await push()) window.location.href = '/api/reports/enforcement-summary.docx' + (project ? `?projects=${project}` : '');
+    if (await push()) window.location.href = docxUrl;
+  };
+  // Save the recommendations first, so the view shows what was just typed.
+  const view = async () => {
+    clearTimeout(timer.current);
+    if (await push()) setViewing(true);
   };
 
   const status = { saved: 'All changes saved', dirty: 'Unsaved changes…', saving: 'Saving…', error: 'Not saved - check the connection' }[state];
@@ -396,10 +475,14 @@ function SummaryReport() {
             {(tl ? tl.projects : []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
         </div>
+        <button className="btn btn-light" onClick={view} disabled={!form} title="Save the recommendations and show the Word report here">
+          <Icon name="bi-eye" /> View Report
+        </button>
         <button className="btn btn-light" onClick={download} disabled={!form} title="Save the recommendations and download the report as a Word document">
           <Icon name="bi-file-earmark-word" /> Download Word
         </button>
       </section>
+      {viewing && <WordViewer url={docxUrl} onClose={() => setViewing(false)} />}
 
       <section className="card-x">
         <div className="hd"><h2>What the document contains</h2><span className="hint">Built from the last sync; sync from the PCE first for current numbers</span></div>
@@ -444,6 +527,222 @@ function SummaryReport() {
             </div>
           </div>
         )}
+      </section>
+    </>
+  );
+}
+
+// Reports > Policy and Blocked Traffic by Scope: rulesets and blocked traffic per application and
+// environment, with the flows judged either by the provisioned rules or by the draft rules.
+type FlowBasis = 'provisioned' | 'draft';
+interface PolicyRow {
+  application: string; environment: string; scope: string; tracked: boolean; status: string; pce_state: string;
+  rulesets: number; ruleset_names: string; rules_draft: number; rules_active: number; rules_pending: number;
+  [count: string]: any;
+}
+type FlowDirection = 'all' | 'in' | 'out';
+interface PolicyReport {
+  rows: PolicyRow[]; totals: Record<string, number>; info: any; notes: Record<FlowBasis, string[]>;
+  direction_notes: Record<FlowDirection, string>;
+}
+const DIRECTION_LABEL: Record<FlowDirection, string> = { all: 'All Directions', in: 'Inbound', out: 'Outbound' };
+
+// Explorer's order: connections (one source, destination, port and protocol), then their flows (times seen).
+const FLOW_COLS = ['potentially_blocked_connections', 'potentially_blocked_flows', 'blocked_connections', 'blocked_flows'];
+const flowKey = (basis: FlowBasis, k: string) => (basis === 'draft' ? 'draft_' + k : k);
+
+function PolicyTraffic() {
+  const { data, toast } = useStore();
+  const [rep, setRep] = useState(null as PolicyReport | null);
+  const [basis, setBasis] = useState('provisioned' as FlowBasis);
+  const [direction, setDirection] = useState('all' as FlowDirection);
+  const [q, setQ] = useState('');
+  const [show, setShow] = useState('all' as 'all' | 'tracked' | 'blocked');
+  const [sort, setSort] = useState({ key: '', dir: -1 });
+  useEffect(() => { api('GET', '/api/reports/policy').then(setRep).catch((e: any) => toast(e.message, 'err')); }, [data.settings.last_sync]);
+
+  const traffic = (rep && rep.info.traffic) || {};
+  const t: Record<string, any> = rep ? rep.totals : {};
+  const draftMissing = basis === 'draft' && traffic.synced_at && !traffic.draft;
+  // A scope's counts in the chosen direction ("in" and "out" hold them); the PCE total is always every connection once.
+  const side = (r: Record<string, any>) => (direction === 'all' || r === t ? r : r[direction] || {});
+  const n = (r: Record<string, any>, k: string) => side(r)[flowKey(basis, k)];
+  const blocked = (r: Record<string, any>) => (n(r, 'potentially_blocked_flows') || 0) + (n(r, 'blocked_flows') || 0);
+
+  const rows = useMemo(() => {
+    if (!rep) return [];
+    const needle = q.trim().toLowerCase();
+    let out = rep.rows.filter(r => (show !== 'tracked' || r.tracked) && (show !== 'blocked' || blocked(r) > 0)
+      && (!needle || `${r.scope} ${r.ruleset_names}`.toLowerCase().includes(needle)));
+    if (sort.key) {
+      const val = (r: PolicyRow) => (FLOW_COLS.includes(sort.key) || sort.key.startsWith('allowed') ? n(r, sort.key) : r[sort.key]);
+      out = [...out].sort((a, b) => {
+        const x = val(a), y = val(b);
+        return (typeof x === 'number' || typeof y === 'number' ? (x ?? -1) - (y ?? -1) : String(x).localeCompare(String(y))) * sort.dir;
+      });
+    }
+    return out;
+  }, [rep, q, show, sort, basis, direction]);
+
+  const head = (k: string, label: string, num = true) => (
+    <th className={`sortable${num ? ' text-end' : ''}`} aria-sort={sort.key === k ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none'}
+      onClick={() => setSort(sort.key === k ? { key: k, dir: -sort.dir } : { key: k, dir: num ? -1 : 1 })}>
+      {label}<span className={`sort${sort.key === k ? ' on' : ''}`}>{sort.key === k ? (sort.dir === 1 ? '▲' : '▼') : '↕'}</span>
+    </th>
+  );
+  // In the draft view, how a count differs from the provisioned one.
+  const cell = (r: Record<string, any>, k: string) => {
+    const v = n(r, k);
+    if (v == null) return <span className="muted">—</span>;
+    const diff = basis === 'draft' && traffic.draft ? v - (side(r)[k] || 0) : 0;
+    return <>{v.toLocaleString()}{diff !== 0 && <span className={`pt-diff ${diff < 0 ? 'down' : 'up'}`}>{diff > 0 ? '+' : '−'}{Math.abs(diff).toLocaleString()}</span>}</>;
+  };
+  const allowed = basis === 'draft';
+
+  return (
+    <>
+      <section className="report-banner">
+        <Logo />
+        <div className="brandname">illumio</div>
+        <div className="ttl">
+          <h2>Policy and Blocked Traffic by Scope</h2>
+          <div>Rulesets and blocked traffic per application and environment{traffic.days ? ` · last ${traffic.days} days` : ''}</div>
+        </div>
+        <div className="meta">Data as of: {fmtDateTime(traffic.synced_at || data.settings.last_sync)}<br />PCE: {data.pce.name}</div>
+        <a className="btn btn-light no-print" href={`/api/reports/policy-traffic.xlsx?basis=${basis}&direction=${direction}`}
+          title={`Download this report as an Excel workbook, with flows counted by the ${basis} rules`
+            + (direction === 'all' ? ' (with Inbound and Outbound sheets)' : `, ${DIRECTION_LABEL[direction].toLowerCase()} only`)}>
+          <Icon name="bi-file-earmark-excel" /> Download Excel
+        </a>
+        <button className="btn btn-outline-light no-print" onClick={() => window.print()}><Icon name="bi-printer" /> Print</button>
+      </section>
+
+      <section className="card-x">
+        <div className="filters pt-basis">
+          <div className="f">
+            <label>Count flows by</label>
+            <div className="btn-group" role="radiogroup" aria-label="Count flows by">
+              {(['provisioned', 'draft'] as FlowBasis[]).map(b => (
+                <button key={b} role="radio" aria-checked={basis === b} className={`btn btn-sm ${basis === b ? 'btn-primary' : 'btn-light'}`}
+                  onClick={() => { setBasis(b); if (sort.key === 'allowed_connections') setSort({ key: '', dir: -1 }); }}>{b === 'draft' ? 'Draft Rules' : 'Provisioned Rules'}</button>
+              ))}
+            </div>
+          </div>
+          <div className="f">
+            <label>Direction</label>
+            <div className="btn-group" role="radiogroup" aria-label="Direction">
+              {(['all', 'in', 'out'] as FlowDirection[]).map(d => (
+                <button key={d} role="radio" aria-checked={direction === d} className={`btn btn-sm ${direction === d ? 'btn-primary' : 'btn-light'}`}
+                  onClick={() => setDirection(d)}>
+                  {d !== 'all' && <Icon name={d === 'in' ? 'bi-box-arrow-in-right' : 'bi-box-arrow-right'} />} {DIRECTION_LABEL[d]}
+                </button>
+              ))}
+            </div>
+          </div>
+          <span className="hint">
+            {basis === 'draft'
+              ? 'The PCE judges each blocked or potentially blocked flow again as if the draft rules were provisioned (Explorer\'s Draft view). The small numbers show the change against the provisioned rules.'
+              : 'Flows are counted by the decision the VENs reported, under the rules that are provisioned today.'}
+          </span>
+        </div>
+        <div className="pt-direction" role="note">
+          <Icon name="bi-signpost-split" />
+          <div>
+            <b>Direction of traffic, seen from each scope.</b>
+            <span className={direction === 'in' ? 'on' : ''}><Icon name="bi-box-arrow-in-right" /> <b>Inbound</b>: traffic coming into the scope. The
+              destination workload is in the scope; the source can be anywhere (another application, the same one, or an IP address).</span>
+            <span className={direction === 'out' ? 'on' : ''}><Icon name="bi-box-arrow-right" /> <b>Outbound</b>: traffic leaving the scope. The
+              source workload is in the scope; the destination can be anywhere.</span>
+            <span className={direction === 'all' ? 'on' : ''}><b>All Directions</b>: both, each connection counted once per scope. A connection between two
+              workloads of the same scope is inbound and outbound to it, so Inbound + Outbound can be more than All Directions.
+              The PCE total row always counts every connection once.</span>
+          </div>
+        </div>
+        {draftMissing && (
+          <div className="alert alert-warning m-3 mt-0">
+            Draft policy decisions were not available at the last sync{traffic.draft_error ? ` (${traffic.draft_error})` : ''}, so the draft counts show 0. Sync from PCE again.
+          </div>
+        )}
+      </section>
+
+      <div className="kpis six pt-kpis">
+        <Kpi icon="bi-journal-text" tone="accent" label="Rulesets" value={t.rulesets || 0} />
+        <Kpi icon="bi-shield-check" tone="st-fe" label="Rules Provisioned" value={t.rules_active || 0} />
+        <Kpi icon="bi-pencil-square" tone="st-se" label="Rules in Draft" value={t.rules_draft || 0} />
+        <Kpi icon="bi-hourglass-split" tone="st-ip" label="Draft Changes Not Provisioned" value={t.rules_pending || 0} />
+        <Kpi icon="bi-exclamation-triangle" tone="st-ip" label="Potentially Blocked Connections" value={n(t, 'potentially_blocked_connections') || 0}
+          sub={`${(n(t, 'potentially_blocked_flows') || 0).toLocaleString()} flows`} />
+        <Kpi icon="bi-slash-circle" tone="danger" label="Blocked Connections" value={n(t, 'blocked_connections') || 0}
+          sub={`${(n(t, 'blocked_flows') || 0).toLocaleString()} flows`} />
+      </div>
+      {allowed && traffic.draft && (
+        <div className="pt-allowed">
+          <Icon name="bi-check-circle-fill" />
+          <span><b className="num">{(t.draft_allowed_connections || 0).toLocaleString()}</b> blocked or potentially blocked connections
+            ({(t.draft_allowed_flows || 0).toLocaleString()} flows) would be allowed once the draft rules are provisioned.</span>
+        </div>
+      )}
+
+      <section className="card-x">
+        <div className="filters no-print">
+          <div className="f">
+            <label htmlFor="pt-q">Search</label>
+            <input id="pt-q" className="form-control form-control-sm" type="search" placeholder="Scope or ruleset…" value={q}
+              onChange={(e: any) => setQ(e.target.value)} />
+          </div>
+          <div className="f">
+            <label htmlFor="pt-show">Show</label>
+            <select id="pt-show" className="form-select form-select-sm" value={show} onChange={(e: any) => setShow(e.target.value)}>
+              <option value="all">All scopes</option>
+              <option value="tracked">Tracked applications only</option>
+              <option value="blocked">Scopes with blocked traffic</option>
+            </select>
+          </div>
+          <span className="hint ms-auto">{rows.length} scope(s){direction !== 'all' && ` · ${DIRECTION_LABEL[direction].toLowerCase()} traffic`}</span>
+        </div>
+        {!rep ? <div className="boot" style={{ height: 160 }}><div className="spinner-border text-primary" role="status" /></div> : (
+          <div className="table-wrap">
+            <table className="grid pt-table">
+              <thead>
+                <tr>
+                  {head('scope', 'Scope', false)}{head('status', 'Tracker Status', false)}{head('pce_state', 'PCE Enforcement', false)}
+                  {head('rulesets', 'Rulesets')}{head('rules_draft', 'Rules in Draft')}{head('rules_active', 'Rules Provisioned')}
+                  {head('rules_pending', 'Draft Changes')}
+                  {head('potentially_blocked_connections', 'Potentially Blocked Connections')}{head('potentially_blocked_flows', 'Potentially Blocked Flows')}
+                  {head('blocked_connections', 'Blocked Connections')}{head('blocked_flows', 'Blocked Flows')}
+                  {allowed && head('allowed_connections', 'Allowed by Draft (Connections)')}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(r => (
+                  <tr key={`${r.tracked}-${r.scope_type}-${r.scope}`} className={`${r.tracked ? '' : 'pt-other'} pt-kind-${r.scope_type}`}
+                    title={r.ruleset_names || 'No rulesets for this scope'}>
+                    <td className="pt-scope"><b>{r.application || r.scope}</b>{r.application && <span className="muted">{r.environment || 'All Environments'}</span>}
+                      {r.scope_type === 'none' && <i className="pt-badge none" title="No scope: the rules apply to every workload in the PCE">Scopeless</i>}
+                      {r.scope_type === 'app' && <i className="pt-badge app" title="Scoped to the application only: the rules apply to every environment of it">Application only</i>}</td>
+                    <td>{r.status ? <StatusPill status={r.status as Status} /> : <span className="muted">Not tracked</span>}</td>
+                    <td className="pt-wrap">{r.pce_state || <span className="muted">—</span>}</td>
+                    <td className="text-end num">{r.rulesets}</td>
+                    <td className="text-end num">{r.rules_draft}</td>
+                    <td className="text-end num">{r.rules_active}</td>
+                    <td className="text-end num">{r.rules_pending ? <b className="pt-pending">{r.rules_pending}</b> : <span className="muted">0</span>}</td>
+                    {FLOW_COLS.map(k => <td key={k} className="text-end num">{cell(r, k)}</td>)}
+                    {allowed && <td className="text-end num">{r.tracked ? (n(r, 'allowed_connections') || 0).toLocaleString() : <span className="muted">—</span>}</td>}
+                  </tr>
+                ))}
+                <tr className="pt-total">
+                  <td className="pt-scope"><b>PCE total</b>{direction !== 'all' && <span className="muted">every connection once</span>}</td><td /><td />
+                  <td className="text-end num">{t.rulesets || 0}</td><td className="text-end num">{t.rules_draft || 0}</td>
+                  <td className="text-end num">{t.rules_active || 0}</td><td className="text-end num">{t.rules_pending || 0}</td>
+                  {FLOW_COLS.map(k => <td key={k} className="text-end num">{cell(t, k)}</td>)}
+                  {allowed && <td className="text-end num">{(t.draft_allowed_connections || 0).toLocaleString()}</td>}
+                </tr>
+              </tbody>
+            </table>
+            {rep.rows.length === 0 && <Empty icon="bi-diagram-3" title="No rulesets or traffic yet">Sync from the PCE first.</Empty>}
+          </div>
+        )}
+        {rep && <ul className="pt-notes">{rep.notes[basis].map(note => <li key={note}>{note}</li>)}</ul>}
       </section>
     </>
   );

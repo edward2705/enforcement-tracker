@@ -16,7 +16,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from docx.enum.section import WD_ORIENT
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
@@ -45,24 +45,29 @@ def day(iso):
     return datetime.date.fromisoformat(iso) if iso else None
 
 
+def tracked_apps(c, pid):
+    apps = [core.with_state(r) for r in c.execute(
+        core.APP_SELECT + " WHERE a.pce_id = ? AND a.hidden = 0 ORDER BY a.excluded, a.rank, a.id", (pid,))]
+    for a in apps:
+        a["environments"] = [core.with_state(e) for e in c.execute(
+            core.ENV_SELECT + " WHERE ae.application_id = ? ORDER BY e.name COLLATE NOCASE", (a["id"],))]
+    return apps
+
+
 def collect(project_ids):
     """Everything the report shows, already filtered to the chosen projects."""
     c = core.con()
     _cfg, pce_name = core.active_pce_name()
     pid = core.pce_id_for(pce_name)
     people = {p["id"]: p for p in core.people_list()}
-    apps = [core.with_state(r) for r in c.execute(
-        core.APP_SELECT + " WHERE a.pce_id = ? AND a.hidden = 0 ORDER BY a.excluded, a.rank, a.id", (pid,))]
-    for a in apps:
-        a["environments"] = [core.with_state(e) for e in c.execute(
-            core.ENV_SELECT + " WHERE ae.application_id = ? ORDER BY e.name COLLATE NOCASE", (a["id"],))]
+    apps = tracked_apps(c, pid)
     tl = timeline.timeline().get_json()
     projects = [p for p in tl["projects"] if not project_ids or p["id"] in project_ids]
     last = c.execute("SELECT completed_at FROM sync_runs WHERE pce_id = ? ORDER BY id DESC LIMIT 1", (pid,)).fetchone()
     # The PCE, VEN, workload and label sections of the Word report describe the whole PCE as of the last sync.
     workloads = [dict(r) for r in c.execute(
         "SELECT w.hostname, a.name AS application, e.name AS environment, w.managed, w.online, w.enforcement_mode, w.ven_status, "
-        "w.ven_version, w.ven_type, w.os FROM workloads w "
+        "w.ven_version, w.ven_type, w.os, w.os_detail, w.online, w.role, w.location, w.app_label, w.env_label, w.label_keys FROM workloads w "
         "LEFT JOIN applications a ON a.id = w.application_id LEFT JOIN environments e ON e.id = w.environment_id "
         "WHERE w.pce_id = ?", (pid,))]
     labels = [dict(r) for r in c.execute(
@@ -425,49 +430,125 @@ def write_table(book, name, headers, widths, rows, formats=None, tab=None):
     return ws
 
 
-POLICY_COUNTS = ("rulesets", "rules_draft", "rules_active", "rules_pending") + policy.TRAFFIC_COLS
+RULE_COUNTS = ("rulesets", "rules_draft", "rules_active", "rules_pending")
+POLICY_COUNTS = RULE_COUNTS + policy.TRAFFIC_COLS
 POLICY_HEADERS = ["Rulesets", "Rules in Draft", "Rules Provisioned", "Draft Changes Not Provisioned",
                   "Potentially Blocked Flows", "Potentially Blocked Connections", "Blocked Flows", "Blocked Connections"]
+BASES = ("provisioned", "draft")   # which rules the flows are judged by
+DIRECTION_NAMES = {"all": "All Directions", "in": "Inbound", "out": "Outbound"}
 
 
-def policy_notes(pol):
-    """What a reader needs to know to trust the Policy & Traffic numbers, one sentence per item."""
-    rules, traffic = pol["info"].get("rules") or {}, pol["info"].get("traffic") or {}
-    notes = []
-    if not rules.get("synced_at") and not traffic.get("synced_at"):
-        notes.append("No rules or traffic have been read yet. Press Sync from PCE in the tracker.")
-    for part, label in ((rules, "Rules"), (traffic, "Blocked traffic")):
-        if part.get("error"):
-            notes.append(f"{label} could not be read at the last sync ({part['error']}); "
-                         + (f"the numbers are from {part['synced_at']}." if part.get("synced_at") else "none are shown."))
-    if traffic.get("synced_at"):
-        notes.append(f"Traffic covers the {traffic.get('days', policy.TRAFFIC_DAYS)} days before the sync of {traffic['synced_at']}. "
-                     "A flow is one source, destination, port and protocol; it counts for the scope of its source and of its destination.")
-    if traffic.get("truncated"):
-        notes.append(f"The PCE returned its maximum of {policy.TRAFFIC_MAX_RESULTS:,} flows, so the traffic counts are incomplete.")
-    notes.append("Rules of a scope are the rules of the rulesets scoped to that application, for that environment or for all "
-                 "environments. Rulesets that name no tracked application are listed by their own scope, without traffic. "
-                 "Totals count each ruleset and each flow once, for the whole PCE.")
+def policy_counts(basis):
+    """The count columns and their headers for flows judged by the provisioned or the draft rules."""
+    if basis == "draft":
+        return (RULE_COUNTS + policy.DRAFT_COLS,
+                POLICY_HEADERS[:4] + [h + " (Draft Rules)" for h in POLICY_HEADERS[4:]]
+                + ["Allowed by Draft Rules (Flows)", "Allowed by Draft Rules (Connections)"])
+    return POLICY_COUNTS, POLICY_HEADERS
+
+
+def direction_note(direction):
+    """Direction of traffic, seen from each scope - printed under every Policy & Traffic sheet."""
+    return ({"all": "Direction: All Directions - each scope counts a connection when the scope is its source or its destination, once.",
+             "in": "Direction: Inbound - traffic coming into the scope: the destination workload is in the scope, the source can be anywhere.",
+             "out": "Direction: Outbound - traffic leaving the scope: the source workload is in the scope, the destination can be anywhere."}[direction]
+            + " A connection between two workloads of the same scope is both inbound and outbound to it, so Inbound + Outbound can be more "
+              "than All Directions. The PCE total counts every connection once, whatever its direction.")
+
+
+def basis_notes(pol, basis):
+    traffic = pol["info"].get("traffic") or {}
+    if basis != "draft":
+        return ["Flows are counted by the policy decision the VENs reported, that is under the provisioned rules."]
+    notes = ["Flows are counted by the PCE's decision under the draft rules, as Explorer shows with Draft view: the "
+             "flows reported as blocked or potentially blocked, judged again as if the draft were provisioned. "
+             "\"Allowed by Draft Rules\" are the connections that provisioning the draft would allow. A connection the PCE "
+             "cannot judge against the draft keeps the decision it was reported with. Connections reported as "
+             "allowed are not re-checked, so a draft change that would block allowed traffic is not counted."]
+    if traffic.get("synced_at") and not traffic.get("draft"):
+        notes.append("Draft policy decisions were not available at the last sync"
+                     + (f" ({traffic['draft_error']})" if traffic.get("draft_error") else "")
+                     + "; the draft counts show 0. Sync from PCE again.")
     return notes
 
 
-def write_policy(book, pol):
-    """Policy & Traffic sheet: per scope, the rules written (draft and provisioned) and the blocked traffic."""
+# Scopes that reach further than one application and environment are highlighted wherever they are listed.
+SCOPE_BADGES = {"Scopeless": ("#B02A2A", "#FFFFFF"), "Application only": ("#FDF1CF", "#8A5A00")}
+SCOPE_TINT = {"none": "#FBDFDF", "app": "#FEF7E4"}
+
+
+def scope_callout(doc, pol):
+    """Word section 4: name the scopeless and application-only rulesets above the table."""
+    lines = []
+    if pol.get("scopeless"):
+        lines.append(f"Scopeless: {len(pol['scopeless'])} ruleset(s) have no scope, so their rules apply to every workload in the "
+                     f"PCE: {', '.join(pol['scopeless'])}. Check that each rule is meant to be global.")
+    if pol.get("app_only"):
+        lines.append(f"Application only: {len(pol['app_only'])} ruleset(s) are scoped to an application without an environment, so "
+                     f"their rules apply to every environment of it (for example production and development alike): "
+                     f"{', '.join(pol['app_only'])}.")
+    if lines:
+        callout(doc, "Rulesets with a wide scope", lines, accent="#B02A2A" if pol.get("scopeless") else WARN, fill="#FDF6F6")
+
+
+def policy_notes(pol, with_traffic=True):
+    """What a reader needs to know to trust the Policy & Traffic numbers, one sentence per item.
+    with_traffic=False: for a page that shows rules only (Word section 4), the traffic notes are left out."""
+    rules, traffic = pol["info"].get("rules") or {}, pol["info"].get("traffic") or {}
+    notes = []
+    if not rules.get("synced_at") and not (with_traffic and traffic.get("synced_at")):
+        notes.append("No rules or traffic have been read yet. Press Sync from PCE in the tracker." if with_traffic
+                     else "No rules have been read yet. Press Sync from PCE in the tracker.")
+    for part, label in ((rules, "Rules"),) + (((traffic, "Blocked traffic"),) if with_traffic else ()):
+        if part.get("error"):
+            notes.append(f"{label} could not be read at the last sync ({part['error']}); "
+                         + (f"the numbers are from {part['synced_at']}." if part.get("synced_at") else "none are shown."))
+    if with_traffic and traffic.get("synced_at"):
+        notes.append(f"Traffic covers the {traffic.get('days', policy.TRAFFIC_DAYS)} days before the sync of {traffic['synced_at']}. "
+                     "As in Explorer, a connection is one source, destination, port and protocol"
+                     + ", and its flows are the number of times it was seen (all the PCE's records for it added up)"
+                     + ". It counts for the scope of its source and of its destination.")
+    if with_traffic and traffic.get("truncated"):
+        notes.append(f"The PCE returned its maximum of {policy.TRAFFIC_MAX_RESULTS:,} traffic records, so the traffic counts are incomplete.")
+    if pol.get("scopeless"):
+        notes.append(f"Scopeless rulesets apply to every workload in the PCE: {', '.join(pol['scopeless'])}.")
+    if pol.get("app_only"):
+        notes.append(f"Application-only rulesets apply to every environment of their application: {', '.join(pol['app_only'])}. "
+                     "They have a row of their own, and their rules also count in each environment's row.")
+    notes.append("Rules of a scope are the rules of the rulesets scoped to that application, for that environment or for all "
+                 "environments. Rulesets that name no tracked application are listed by their own scope"
+                 + (", without traffic. Totals count each ruleset and each connection once, for the whole PCE." if with_traffic
+                    else ". Totals count each ruleset once, for the whole PCE."))
+    return notes
+
+
+def write_policy(book, pol, basis="provisioned", direction="all"):
+    """Policy & Traffic sheet: per scope, the rules written (draft and provisioned) and the blocked traffic,
+    with flows judged by the provisioned or the draft rules, in either or one direction."""
+    counts, count_headers = policy_counts(basis)
+    if direction != "all":
+        count_headers = count_headers[:4] + [f"{h} ({DIRECTION_NAMES[direction]})" for h in count_headers[4:]]
     rows = []
     for r in pol["rows"]:
-        rows.append({"values": [r["application"], r["environment"], r["scope"], r["status"], r["pce_state"]]
-                     + ["" if r[k] is None else r[k] for k in POLICY_COUNTS] + [r["ruleset_names"]],
-                     "_style": {} if r["tracked"] else {"font_color": MUTED, "italic": True}})
-    rows.append({"values": ["PCE total", "", "All scopes", "", ""] + [pol["totals"][k] for k in POLICY_COUNTS] + [""],
+        values = {**r, **(r[direction] or {})} if direction != "all" else r
+        kind = r.get("scope_type")
+        style = {} if r["tracked"] else {"font_color": MUTED, "italic": True}
+        if kind in SCOPE_TINT:   # scopeless and application-only scopes stand out
+            style = {**style, "bg_color": SCOPE_TINT[kind], "font_color": SCOPE_BADGES[policy.SCOPE_TYPES[kind]][0] if kind == "none" else INK}
+        rows.append({"values": [r["application"], r["environment"], r["scope"], policy.SCOPE_TYPES.get(kind, ""), r["status"], r["pce_state"]]
+                     + ["" if values.get(k) is None else values[k] for k in counts] + [r["ruleset_names"]],
+                     "_style": style})
+    rows.append({"values": ["PCE total", "", "All scopes", "", "", ""] + [pol["totals"][k] for k in counts] + [""],
                  "_style": {"bold": True, "bg_color": "#F1F3F7", "top": 1, "top_color": NAVY}})
-    numbers = {i: {"num_format": "#,##0", "align": "right"} for i in range(5, 5 + len(POLICY_COUNTS))}
-    headers = ["Application", "Environment", "Scope", "Tracker Status", "PCE Enforcement"] + POLICY_HEADERS + ["Ruleset Names"]
-    ws = write_table(book, "Policy & Traffic", headers, [28, 16, 40, 22, 22, 10, 12, 13, 16, 14, 16, 12, 14, 60], rows, numbers,
-                     tab="#7A4FD0")
+    numbers = {i: {"num_format": "#,##0", "align": "right"} for i in range(6, 6 + len(counts))}
+    headers = ["Application", "Environment", "Scope", "Scope Type", "Tracker Status", "PCE Enforcement"] + count_headers + ["Ruleset Names"]
+    widths = [28, 16, 40, 22, 22, 22, 10, 12, 13, 16] + [16] * (len(counts) - 4) + [60]
+    ws = write_table(book, "Policy & Traffic" if direction == "all" else f"Policy & Traffic {DIRECTION_NAMES[direction]}",
+                     headers, widths, rows, numbers, tab="#7A4FD0")
     ws.set_row(0, 40)  # the count headers wrap onto two lines
     for i, value in enumerate(headers):
         ws.write(0, i, value, book.fmt(bold=True, bg_color=NAVY, font_color="#FFFFFF", border=1, border_color="#26354D", indent=1, text_wrap=True))
-    for i, note in enumerate(policy_notes(pol)):
+    for i, note in enumerate(basis_notes(pol, basis) + [direction_note(direction)] + policy_notes(pol)):
         ws.write(len(rows) + 2 + i, 0, note, book.fmt(font_color=MUTED, italic=True, font_size=9))
     return ws
 
@@ -820,12 +901,34 @@ def doc_chart(doc, panels, height=2.75, widths=None):
     doc.paragraphs[-1].paragraph_format.space_after = Pt(6)
 
 
-RATINGS = {"Action": ("#FBDFDF", "#B02A2A"), "Attention": ("#FDF1CF", "#8A5A00"), "Good": ("#DDF3E4", "#146C36")}
+RATINGS = {"Critical": ("#B02A2A", "#FFFFFF"), "Action": ("#FBDFDF", "#B02A2A"), "Attention": ("#FDF1CF", "#8A5A00"), "Good": ("#DDF3E4", "#146C36")}
+
+
+def windows_client(w):
+    """A Windows desktop OS (Windows 10/11), as opposed to Windows Server. The PCE's os_id says
+    "win-...-client"; older VENs only give the product name in os_detail."""
+    os_id, detail = (w["os"] or "").lower(), (w["os_detail"] or "").lower()
+    if not os_id.startswith("win") and "windows" not in detail:
+        return False
+    return "client" in os_id or ("windows" in detail and "server" not in detail and "server" not in os_id)
+
+
+def unsupported_vens(workloads):
+    """Windows clients running the server VEN: not a supported deployment (they need the endpoint VEN)."""
+    return sorted((w for w in workloads if w["managed"] and (w["ven_type"] or "").lower() == "server" and windows_client(w)),
+                  key=lambda w: (w["hostname"] or "").lower())
+
+
+def os_name(w):
+    """The product name the VEN reports, e.g. "Windows 10 Enterprise LTSC 2024", else the os_id."""
+    detail = w["os_detail"] or ""
+    return detail[detail.rfind("(") + 1:-1] if detail.endswith(")") and "(" in detail else (w["os"] or "")
 
 
 def assess(data):
     """Rule-based findings from the report's own numbers: (area, finding, rating, recommendation).
-    Good means nothing is outstanding; Attention is work still to do; Action is something broken or late."""
+    Good means nothing is outstanding; Attention is work still to do; Action is something broken or late;
+    Critical is an unsupported deployment that must be fixed first."""
     pol, workloads, labels = data["policy"], data["workloads"], data["labels"]
     t = pol["totals"]
     vens = [w for w in workloads if w["managed"]]
@@ -839,7 +942,7 @@ def assess(data):
     full = sum(1 for w in vens if w["enforcement_mode"] == "full")
     rest = ", ".join(f"{sum(1 for w in vens if w['enforcement_mode'] == m):,} {name.lower()}" for m, name in MODE_NAMES.items() if m != "full")
     if vens and full == len(vens):
-        add("Enforcement coverage", f"All {len(vens):,} VENs are in full enforcement.", "Good", "Keep monitoring blocked traffic for new flows.")
+        add("Enforcement coverage", f"All {len(vens):,} VENs are in full enforcement.", "Good", "Keep new workloads of these applications in full enforcement as they are added.")
     else:
         add("Enforcement coverage", f"{full:,} of {len(vens):,} VENs ({(full / len(vens) if vens else 0):.0%}) are in full enforcement; {rest}.",
             "Attention", f"Move the remaining {len(vens) - full:,} VENs to full enforcement as their applications finish policy validation.")
@@ -850,6 +953,14 @@ def assess(data):
             "Restore connectivity to the PCE or unpair VENs of decommissioned hosts; offline VENs do not receive policy changes.")
     else:
         add("VEN connectivity", f"All {len(vens):,} VENs are online.", "Good", "No action needed.")
+
+    wrong = unsupported_vens(workloads)
+    if wrong:
+        add("VEN type", f"{len(wrong):,} Windows client(s) have the server VEN installed, which is not supported: "
+            f"{names([w['hostname'] for w in wrong])}.", "Critical",
+            "Unpair the server VEN and install the endpoint VEN on these Windows clients.")
+    else:
+        add("VEN type", "No Windows client has the server VEN installed.", "Good", "No action needed.")
 
     unmanaged = len(workloads) - len(vens)
     if unmanaged:
@@ -893,21 +1004,6 @@ def assess(data):
                 "Write scoped rulesets for these applications before moving them to enforcement, or confirm global rulesets cover them.")
         else:
             add("Policy coverage", "Every tracked scope with VENs has a ruleset of its own.", "Good", "No action needed.")
-
-    traffic = pol["info"].get("traffic") or {}
-    if traffic.get("synced_at"):
-        days = traffic.get("days", policy.TRAFFIC_DAYS)
-        for key, area, zero, advice in (
-                ("potentially_blocked_flows", "Potentially blocked traffic", "No potentially blocked flows",
-                 "These flows will be dropped once the scope is enforced. Add rules for the legitimate ones first."),
-                ("blocked_flows", "Blocked traffic", "No blocked flows",
-                 "Confirm these blocks are intended and add rules for any legitimate traffic that is being dropped.")):
-            if t[key]:
-                top = sorted((r for r in pol["rows"] if r["tracked"] and r[key]), key=lambda r: -r[key])
-                add(area, f"{t[key]:,} {area.lower().replace(' traffic', '')} flows in the last {days} days; most on "
-                          f"{names([r['scope'] + f' ({r[key]:,})' for r in top], 3)}.", "Attention", advice)
-            else:
-                add(area, f"{zero} in the last {days} days.", "Good", "No action needed.")
 
     drift = [r["scope"] for r in pol["rows"] if r["tracked"] and core.PCE_STATE_STATUS.get(r["pce_state"]) != r["status"]]
     if drift:
@@ -1100,9 +1196,9 @@ def form_grid(doc, headers, widths, blank_rows, height=0.42, numbered=True, fill
     return table
 
 
-def doc_theme(doc, data):
+def doc_theme(doc, data, preview=False):
     """Landscape page, Illumio colours on the headings, and a footer with the page number on every
-    page but the cover."""
+    page but the cover. The in-app preview leaves the page number out: browsers cannot work it out."""
     section = doc.sections[0]
     section.orientation = WD_ORIENT.LANDSCAPE
     section.page_width, section.page_height = section.page_height, section.page_width
@@ -1111,7 +1207,7 @@ def doc_theme(doc, data):
     doc.styles["Normal"].font.name = "Calibri"
     doc.styles["Normal"].font.size = Pt(10)
     doc.styles["Normal"].font.color.rgb = rgb(INK)
-    for name, size, color, before in (("Heading 1", 20, NAVY, 0), ("Heading 2", 13, ORANGE, 14)):
+    for name, size, color, before in (("Heading 1", 20, NAVY, 0), ("Heading 2", 13, ORANGE, 14), ("Heading 3", 11, NAVY, 10)):
         style = doc.styles[name]
         style.font.name = "Calibri"
         style.font.size = Pt(size)
@@ -1122,6 +1218,10 @@ def doc_theme(doc, data):
         fonts = style.element.rPr.find(qn("w:rFonts"))
         for attr in ("asciiTheme", "hAnsiTheme"):   # the template's theme font would win over the name set above
             fonts.attrib.pop(qn(f"w:{attr}"), None)
+        # The template's linked character style ("Heading 1 Char") keeps its own blue; Word ignores it for
+        # these paragraphs, but other viewers (the in-app preview) apply it, so give it the same colour.
+        if f"{name} Char" in [st.name for st in doc.styles]:
+            doc.styles[f"{name} Char"].font.color.rgb = rgb(color)
     rule = OxmlElement("w:pBdr")   # orange rule under every section heading
     line = OxmlElement("w:bottom")
     for attr, value in (("val", "single"), ("sz", "12"), ("space", "3"), ("color", ORANGE.lstrip("#"))):
@@ -1146,10 +1246,11 @@ def doc_theme(doc, data):
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     customer = data["consultant"]["customer"]
-    footer.add_run((f"Prepared for {customer}  ·  " if customer else "") + f"PCE {data['pce']}  ·  Page ")
-    field(footer, "PAGE", None, wrap=True)
-    footer.add_run(" of ")
-    field(footer, "NUMPAGES", None, wrap=True)
+    footer.add_run((f"Prepared for {customer}  ·  " if customer else "") + f"PCE {data['pce']}" + ("" if preview else "  ·  Page "))
+    if not preview:
+        field(footer, "PAGE", None, wrap=True)
+        footer.add_run(" of ")
+        field(footer, "NUMPAGES", None, wrap=True)
     for run in footer.runs:
         run.font.size = Pt(8)
         run.font.color.rgb = rgb(MUTED)
@@ -1174,9 +1275,11 @@ def field(par, code, kind, wrap=False):
     return run
 
 
-def doc_front(doc, details):
+def doc_front(doc, details, preview=False):
     """Cover page and table of contents, written last (the contents list the headings that exist) and
-    then moved ahead of the first section."""
+    then moved ahead of the first section. For the in-app preview the full-page picture behind the
+    cover is left out (browsers draw it over the text; the cover cells carry the same colours) and the
+    contents start with a hard page break, which the browser renderer follows."""
     body = doc.element.body
     first, mark = body[0], len(body) - 1   # new elements are added just before the closing section properties
     headings = [(p.style.name, p.text) for p in doc.paragraphs if p.style.name in ("Heading 1", "Heading 2")]
@@ -1187,13 +1290,14 @@ def doc_front(doc, details):
     # The picture hangs off a paragraph of the cover itself, not the page header: Word shows header
     # content dimmed on screen, which would fade the accent bars and any page colour.
     section = doc.sections[0]
-    holder = doc.add_paragraph()
-    holder.paragraph_format.space_after = Pt(0)
-    backdrop = holder.add_run()
-    backdrop.font.size = Pt(1)
-    backdrop.add_picture(cover_background(section.page_width / 914400, section.page_height / 914400),
-                         width=section.page_width, height=section.page_height)
-    behind_page(backdrop)
+    if not preview:
+        holder = doc.add_paragraph()
+        holder.paragraph_format.space_after = Pt(0)
+        backdrop = holder.add_run()
+        backdrop.font.size = Pt(1)
+        backdrop.add_picture(cover_background(section.page_width / 914400, section.page_height / 914400),
+                             width=section.page_width, height=section.page_height)
+        behind_page(backdrop)
 
     cover, widths = fixed_table(doc, 1, [1])
     cover.rows[0].height = Inches(4.0)
@@ -1238,8 +1342,10 @@ def doc_front(doc, details):
     run.font.color.rgb = rgb(COVER["label"])
 
     # ---- contents: a real Word field, so page numbers are filled in when the document is opened
+    if preview:
+        doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
     title = doc.add_paragraph()
-    title.paragraph_format.page_break_before = True
+    title.paragraph_format.page_break_before = not preview
     title.paragraph_format.space_after = Pt(10)
     run = title.add_run("Table of Contents")
     run.font.size, run.bold = Pt(16), True
@@ -1282,13 +1388,66 @@ def doc_front(doc, details):
         first.addprevious(element)
 
 
-def build_docx(data):
+LABEL_GAPS = (("No labels", "Workloads with No Labels", "", "No rule can select these workloads by label."),
+              ("Role label only", "Workloads with Only a Role Label", "role",
+               "Without an application and environment label these workloads fall outside every application scope."),
+              ("Application label only", "Workloads with Only an Application Label", "app",
+               "Without environment and role labels, rules cannot tell these workloads apart within the application."))
+LABEL_GAP_LIMIT = 1000   # rows listed per category; the count is always complete
+
+
+def unsupported_section(doc, wrong):
+    """Section 2: Windows clients running the server VEN, flagged Critical and listed with their labels."""
+    doc.add_heading("Unsupported VEN Deployments", level=2)
+    if not wrong:
+        callout(doc, "No unsupported VEN deployments", ["No Windows client has the server VEN installed."], accent="#17994F")
+        return
+    callout(doc, f"Critical: {len(wrong):,} Windows client(s) with the server VEN", [
+        "The server VEN is supported on Windows Server. Windows desktop operating systems (Windows 10 and 11) need the endpoint VEN.",
+        "Unpair the server VEN and pair these workloads with the endpoint VEN before moving them further towards enforcement.",
+    ], accent="#B02A2A", fill="#FBDFDF", bullets=False)
+    doc_table(doc, ["Hostname", "Operating System", "VEN Type", "VEN Version", "Application", "Environment", "Location", "Role", "Severity"],
+              [[w["hostname"] or "(no hostname)", os_name(w), (w["ven_type"] or "").capitalize(), w["ven_version"] or "",
+                w["app_label"] or "—", w["env_label"] or "—", w["location"] or "—", w["role"] or "—", "Critical"] for w in wrong],
+              [1.4, 1.9, 0.7, 0.9, 1.2, 1.0, 0.9, 0.9, 0.8], badges={8: RATINGS})
+
+
+def workload_labelling(doc, workloads):
+    """Section 2: the workloads whose labels leave them out of policy - none at all, or only a role or
+    only an application label - each listed by hostname."""
+    doc.add_heading("Workload Labelling", level=2)
+    if any(w["label_keys"] is None for w in workloads):
+        doc.add_paragraph("Label assignments are read at the next Sync from PCE; sync again to list these workloads.")
+        return
+    groups = [(name, title, [w for w in workloads if w["label_keys"] == keys], why) for name, title, keys, why in LABEL_GAPS]
+    doc_table(doc, ["Category", "Workloads", "Share", "Why it matters"],
+              [[name, len(items), f"{(len(items) / len(workloads) if workloads else 0):.1%}", why] for name, _title, items, why in groups],
+              [2.4, 1.0, 1.0, 5.4], right=(1, 2), colors={1: NAVY})
+    for name, title, items, _why in groups:
+        doc.add_heading(f"{title} ({len(items):,})", level=3)
+        if not items:
+            doc.add_paragraph("None.")
+            continue
+        label = {"Role label only": ("Role", "role"), "Application label only": ("Application", "app_label")}.get(name)
+        items = sorted(items, key=lambda w: (w["hostname"] or "").lower())
+        rows = [[w["hostname"] or "(no hostname)"] + ([w[label[1]]] if label else [])
+                + ["VEN" if w["managed"] else "Unmanaged",
+                   (w["enforcement_mode"] or "").replace("_", " ").capitalize() if w["managed"] else "",
+                   ("Online" if w["online"] else "Offline") if w["managed"] else "", w["os"] or ""]
+                for w in items[:LABEL_GAP_LIMIT]]
+        doc_table(doc, ["Hostname"] + ([label[0]] if label else []) + ["Managed", "Enforcement", "Status", "OS"], rows,
+                  [3.0] + ([1.8] if label else []) + [1.0, 1.3, 0.9, 1.8 if label else 3.6])
+        if len(items) > LABEL_GAP_LIMIT:
+            note(doc, f"The first {LABEL_GAP_LIMIT:,} of {len(items):,} workloads are listed, by hostname.")
+
+
+def build_docx(data, preview=False):
     """The enforcement summary as an Illumio-themed Word document for the customer: cover, contents,
     executive summary, the PCE, VENs and workloads, labels, policy and blocked traffic by scope, the
     applications, an assessment, and the consultant's recommendations (as entered on the Reports page,
     or as an empty form)."""
     doc = docx.Document()
-    doc_theme(doc, data)
+    doc_theme(doc, data, preview)
     pol, conf, consultant = data["policy"], data["conf"], data["consultant"]
     info, t = pol["info"], pol["totals"]
     pce = info.get("pce") or {}
@@ -1334,7 +1493,7 @@ def build_docx(data):
     if consultant["executive_summary"]:
         callout(doc, "Consultant's Summary", consultant["executive_summary"].split("\n"), bullets=False)
     key = [f for f in findings if f[2] != "Good"]
-    key.sort(key=lambda f: f[2] != "Action")
+    key.sort(key=lambda f: {"Critical": 0, "Action": 1}.get(f[2], 2))
     if key:
         callout(doc, "Key Findings", [f"{area}: {finding}" for area, finding, _rating, _advice in key[:6]])
     else:
@@ -1372,6 +1531,7 @@ def build_docx(data):
         doc.add_paragraph("No workload data is available yet.")
     else:
         by_type = [(name.capitalize(), n) for name, n in tally(vens, "ven_type", "unknown")]
+        wrong = unsupported_vens(workloads)
         versions = sorted(tally(vens, "ven_version", "Unknown"), key=lambda kv: version_key(kv[0]), reverse=True)
         doc_table(doc, ["Measure", "Value", "Detail"], [
             ["Deployed VENs", len(vens), ", ".join(f"{n:,} {name.lower()}" for name, n in by_type)],
@@ -1380,7 +1540,8 @@ def build_docx(data):
             ["Suspended", suspended, share(suspended, len(vens)) if suspended else ""],
             ["Unmanaged workloads", len(workloads) - len(vens), f"{share(len(workloads) - len(vens), len(workloads))} of {len(workloads):,} workloads"],
             ["VEN versions in use", len(versions), f"Newest: {versions[0][0]}" if versions else ""],
-        ], [3.2, 1.3, 5.3], right=(1,), colors={1: NAVY})
+            ["Windows clients with a server VEN", len(wrong), "Critical - not supported; see Unsupported VEN Deployments" if wrong else "None"],
+        ], [3.2, 1.3, 5.3], right=(1,), colors={1: NAVY}, tints={6: "#FBDFDF"} if wrong else None)
         doc_table(doc, ["Measure", "Value", "Detail"],
                   [[name.replace(" Enforcement", "").capitalize() + " enforcement", n, share(n, len(vens))] for name, n, _color in mode_parts],
                   [3.2, 1.3, 5.3], right=(1,), colors={1: NAVY})
@@ -1420,6 +1581,8 @@ def build_docx(data):
         doc.add_heading("By Environment", level=2)
         doc_table(doc, ["Environment"] + counts, group_rows("environment", "(no environment label)", False), [4.05] + narrow, right=range(1, 10))
         note(doc, "Online, Offline and the enforcement mode columns count VENs. Unmanaged workloads have no VEN and cannot be enforced by the PCE.")
+        unsupported_section(doc, wrong)
+        workload_labelling(doc, workloads)
 
     # ---- 3. Labels
     doc.add_heading("3. Label Summary", level=1)
@@ -1468,24 +1631,27 @@ def build_docx(data):
 
     # ---- 4. Policy and traffic
     doc.add_heading("4. Policy and Blocked Traffic by Scope", level=1)
-    lead(doc, f"The rules written for each application and environment, and the traffic the PCE reported as blocked or "
-              f"potentially blocked over the last {days} days.")
+    lead(doc, "The rulesets and rules written for each application and environment, in draft and provisioned, and the "
+              "draft changes that are not provisioned yet.")
     doc_tiles(doc, [("Rulesets", t["rulesets"]), ("Rules in Draft", t["rules_draft"]), ("Rules Provisioned", t["rules_active"]),
-                    ("Draft Not Provisioned", t["rules_pending"], WARN if t["rules_pending"] else ORANGE),
-                    ("Potentially Blocked Flows", t["potentially_blocked_flows"]), ("Blocked Flows", t["blocked_flows"])])
+                    ("Draft Not Provisioned", t["rules_pending"], WARN if t["rules_pending"] else ORANGE)])
     tracked = [r for r in pol["rows"] if r["tracked"]]
     top = lambda key: [(r["scope"], r[key]) for r in sorted(tracked, key=lambda r: -(r[key] or 0)) if r[key]]  # noqa: E731
-    doc_chart(doc, [lambda ax: hbars(ax, "Potentially Blocked Flows by Scope", top("potentially_blocked_flows"), "#E39B00", limit=6),
-                    lambda ax: hbars(ax, "Blocked Flows by Scope", top("blocked_flows"), "#D03B3B", limit=6),
-                    lambda ax: hbars(ax, "Provisioned Rules by Scope", top("rules_active"), NAVY, limit=6)], height=3.3)
-    rows = [[r["scope"], r["status"], r["pce_state"]] + [r[k] for k in POLICY_COUNTS] for r in pol["rows"]]
-    rows.append(["PCE total", "", ""] + [t[k] for k in POLICY_COUNTS])
+    doc_chart(doc, [lambda ax: hbars(ax, "Provisioned Rules by Scope", top("rules_active"), NAVY, limit=6),
+                    lambda ax: hbars(ax, "Rules in Draft by Scope", top("rules_draft"), ORANGE, limit=6)], height=3.3)
+    scope_callout(doc, pol)
+    # Rules only here; the traffic counts are on the Reports tab and in the Excel workbook.
+    counts = RULE_COUNTS
+    rows = [[r["scope"], policy.SCOPE_TYPES.get(r.get("scope_type"), ""), r["status"], r["pce_state"]] + [r[k] for k in counts]
+            for r in pol["rows"]]
+    rows.append(["PCE total", "", "", ""] + [t[k] for k in counts])
     status_badges = {s_: (STATUS_TINT[s_], STATUS_TEXT[s_]) for s_ in APP_STATUSES}
-    doc_table(doc, ["Scope", "Project Status", "PCE Enforcement", "Rulesets", "Rules in Draft", "Rules Provisioned", "Draft Not Provisioned",
-                    "Potentially Blocked Flows", "Potentially Blocked Conn.", "Blocked Flows", "Blocked Conn."],
-              rows, [2.3, 1.2, 1.15, 0.65, 0.6, 0.8, 0.8, 0.8, 0.85, 0.6, 0.75], right=range(3, 11), bold_rows={len(rows) - 1},
-              badges={1: status_badges})
-    for text in policy_notes(pol):
+    doc_table(doc, ["Scope", "Scope Type", "Project Status", "PCE Enforcement", "Rulesets", "Rules in Draft", "Rules Provisioned",
+                    "Draft Not Provisioned"],
+              rows, [3.0, 1.3, 1.45, 1.45, 0.75, 0.75, 0.9, 0.9], right=range(4, 8), bold_rows={len(rows) - 1},
+              badges={1: SCOPE_BADGES, 2: status_badges},
+              tints={n: SCOPE_TINT[r.get("scope_type")] for n, r in enumerate(pol["rows"]) if r.get("scope_type") in SCOPE_TINT})
+    for text in policy_notes(pol, with_traffic=False):
         note(doc, text)
 
     # ---- 5. Applications
@@ -1518,12 +1684,14 @@ def build_docx(data):
     doc.add_heading("6. Assessment Summary", level=1)
     lead(doc, "An automated health check of the deployment: one finding per area, with a rating and a suggested next step.")
     count = lambda rating: sum(1 for f in findings if f[2] == rating)  # noqa: E731
-    doc_tiles(doc, [("Areas Assessed", len(findings)), ("Action", count("Action"), "#B02A2A" if count("Action") else ORANGE),
+    doc_tiles(doc, [("Areas Assessed", len(findings)), ("Critical", count("Critical"), "#B02A2A" if count("Critical") else ORANGE),
+                    ("Action", count("Action"), "#B02A2A" if count("Action") else ORANGE),
                     ("Attention", count("Attention")), ("Good", count("Good"), "#146C36")])
-    order = {"Action": 0, "Attention": 1, "Good": 2}
+    order = {"Critical": 0, "Action": 1, "Attention": 2, "Good": 3}
     doc_table(doc, ["Area", "Finding", "Rating", "Recommendation"], [list(f) for f in sorted(findings, key=lambda f: order[f[2]])],
               [1.6, 3.9, 0.8, 3.5], badges={2: RATINGS})
-    note(doc, "Ratings are generated automatically from the data in this report. Action: something is not working or is overdue. "
+    note(doc, "Ratings are generated automatically from the data in this report. Critical: an unsupported deployment to fix first. "
+              "Action: something is not working or is overdue. "
               "Attention: work still to do. Good: nothing outstanding.")
 
     # ---- 7. Recommendations: what the consultant entered on the Reports page, or an empty form
@@ -1573,7 +1741,7 @@ def build_docx(data):
     doc_front(doc, [[("PCE", data["pce"]), ("Address", address), ("PCE version", pce.get("version") or "")],
                     [("Project", projects), ("Data as of", synced_text), ("Report date", datetime.date.today().strftime("%b %-d, %Y"))],
                     [("Prepared for", consultant["customer"]), ("Prepared by", consultant["consultant"]),
-                     ("Document version", consultant["document_version"])]])
+                     ("Document version", consultant["document_version"])]], preview)
 
     stream = io.BytesIO()
     doc.save(stream)
@@ -1659,6 +1827,48 @@ def enforcement_summary():
     return download(build(report_data()), "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+def policy_data():
+    c = core.con()
+    _cfg, name = core.active_pce_name()
+    pid = core.pce_id_for(name)
+    return policy.summary(c, pid, tracked_apps(c, pid))
+
+
+def basis_arg():
+    basis = request.args.get("basis", "provisioned")
+    if basis not in BASES:
+        raise core.ApiError("basis must be provisioned or draft")
+    return basis
+
+
+@bp.get("/api/reports/policy")
+def policy_report():
+    """Reports > Policy and Blocked Traffic by Scope: every count, both by provisioned and by draft rules."""
+    pol = policy_data()
+    return jsonify({**pol, "notes": {b: basis_notes(pol, b) + policy_notes(pol) for b in BASES},
+                    "direction_notes": {d: direction_note(d) for d in DIRECTION_NAMES}})
+
+
+@bp.get("/api/reports/policy-traffic.xlsx")
+def policy_report_xlsx():
+    basis = basis_arg()
+    direction = request.args.get("direction", "all")
+    if direction not in DIRECTION_NAMES:
+        raise core.ApiError("direction must be all, in or out")
+    stream = io.BytesIO()
+    book = Book(stream)
+    pol = policy_data()
+    # All directions: one sheet each way as well, so the workbook has both categories side by side.
+    for d in (("all", "in", "out") if direction == "all" else (direction,)):
+        write_policy(book, pol, basis, d)
+    book.wb.close()
+    suffix = "" if direction == "all" else f"-{DIRECTION_NAMES[direction].lower()}"
+    filename = f"illumio-policy-traffic-{basis}{suffix}-{datetime.date.today().isoformat()}.xlsx"
+    return Response(stream.getvalue(), mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 @bp.get("/api/reports/enforcement-summary.docx")
 def enforcement_summary_docx():
-    return download(build_docx(report_data()), "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    # preview=1: the same document for Reports > View Report, adjusted for drawing in a browser.
+    return download(build_docx(report_data(), preview=request.args.get("preview") == "1"), "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
