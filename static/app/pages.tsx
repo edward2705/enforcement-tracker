@@ -277,7 +277,7 @@ function PeoplePage() {
 function ReportsPage() {
   const { data, run, open, person } = useStore();
   const [group, setGroup] = useState('pm');
-  const [view, setView] = useState('summary'); // 'summary' = the enforcement summary report, 'rollups' = tables and exceptions
+  const [view, setView] = useState('summary'); // 'summary' = the on-screen summary, 'report' = the Word report and the consultant's input, 'rollups' = tables and exceptions
   const apps = activeApps(data.apps);
   const keyOf: Record<string, (a: App) => string[]> = {
     pm: a => [person(a.pm_id)?.name || 'Unassigned'],
@@ -297,6 +297,7 @@ function ReportsPage() {
   const tabs = (
     <div className="tabs report-tabs no-print" role="tablist">
       <button role="tab" aria-selected={view === 'summary'} className={view === 'summary' ? 'on' : ''} onClick={() => setView('summary')}>Illumio Enforcement Summary</button>
+      <button role="tab" aria-selected={view === 'report'} className={view === 'report' ? 'on' : ''} onClick={() => setView('report')}>Enforcement Summary Report</button>
       <button role="tab" aria-selected={view === 'rollups'} className={view === 'rollups' ? 'on' : ''} onClick={() => setView('rollups')}>
         Roll-ups &amp; Exceptions{overdue.length + drift.length > 0 && <span className="cnt num">{overdue.length + drift.length}</span>}
       </button>
@@ -309,6 +310,7 @@ function ReportsPage() {
     </div>
   );
   if (view === 'summary') return <>{tabs}<EnforcementSummary /></>;
+  if (view === 'report') return <>{tabs}<SummaryReport /></>;
   return (
     <>
       {tabs}

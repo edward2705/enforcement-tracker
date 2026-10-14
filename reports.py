@@ -6,6 +6,8 @@ Policy & Traffic (rules and blocked traffic per scope), People, Environments and
 """
 import datetime
 import io
+import json
+import os
 
 import docx
 import matplotlib
@@ -18,7 +20,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
-from flask import Blueprint, Response, request
+from flask import Blueprint, Response, jsonify, request
 
 import policy
 import timeline
@@ -60,14 +62,14 @@ def collect(project_ids):
     # The PCE, VEN, workload and label sections of the Word report describe the whole PCE as of the last sync.
     workloads = [dict(r) for r in c.execute(
         "SELECT w.hostname, a.name AS application, e.name AS environment, w.managed, w.online, w.enforcement_mode, w.ven_status, "
-        "w.ven_version, w.policy_sync_state, w.os, w.location, w.role FROM workloads w "
+        "w.ven_version, w.ven_type, w.os FROM workloads w "
         "LEFT JOIN applications a ON a.id = w.application_id LEFT JOIN environments e ON e.id = w.environment_id "
         "WHERE w.pce_id = ?", (pid,))]
     labels = [dict(r) for r in c.execute(
         "SELECT key, value, workload_count, used_by FROM labels WHERE pce_id = ? ORDER BY key COLLATE NOCASE, value COLLATE NOCASE", (pid,))]
     return {"apps": apps, "people": people, "projects": projects, "tl": tl, "pce": pce_name,
             "last_sync": last["completed_at"] if last else None, "policy": policy.summary(c, pid, apps),
-            "workloads": workloads, "labels": labels, "conf": _cfg.get(pce_name) or {}}
+            "workloads": workloads, "labels": labels, "conf": _cfg.get(pce_name) or {}, "consultant": load_consultant(pid)}
 
 
 def task_rows(tl, projects):
@@ -643,29 +645,44 @@ def grid_lines(table, color=GRID):
         for attr, value in (("val", "single"), ("sz", "4"), ("space", "0"), ("color", color.lstrip("#"))):
             line.set(qn(f"w:{attr}"), value)
         lines.append(line)
-    table._tbl.tblPr.find(qn("w:tblLayout")).addprevious(lines)
+    layout = table._tbl.tblPr.find(qn("w:tblLayout"))
+    layout.addprevious(lines)
+    for old in table._tbl.tblPr.findall(qn("w:tblCellMar")):
+        table._tbl.tblPr.remove(old)
+    padding = OxmlElement("w:tblCellMar")   # breathing room around the text of every cell
+    for side, twips in (("top", 55), ("left", 100), ("bottom", 55), ("right", 100)):
+        edge = OxmlElement(f"w:{side}")
+        edge.set(qn("w:w"), str(twips))
+        edge.set(qn("w:type"), "dxa")
+        padding.append(edge)
+    layout.addnext(padding)
 
 
-def doc_table(doc, headers, rows, widths, right=(), bold_rows=(), tints=None, colors=None, badges=None):
+def doc_table(doc, headers, rows, widths, right=(), bold_rows=(), tints=None, colors=None, badges=None, size=None):
     """A banded table with a navy header that repeats on every page. `rows` are lists of cell values,
-    `tints` maps a row index to a fill colour and `colors` a column index to a text colour. `badges` is
-    (column, {value: (fill, text colour)}): cells of that column are coloured by their value."""
+    `tints` maps a row index to a fill colour and `colors` a column index to a text colour. `badges`
+    maps a column index to {value: (fill, text colour)}: cells of that column are coloured by their
+    value. Wide tables get slightly smaller text so they stay on the page."""
+    size = size or (9 if len(headers) <= 8 else 8)
+    badges = badges or {}
     table, widths = fixed_table(doc, len(headers), widths)
     grid_lines(table)
     repeat = OxmlElement("w:tblHeader")
     repeat.set(qn("w:val"), "true")
     table.rows[0]._tr.get_or_add_trPr().append(repeat)
     for i, text in enumerate(headers):
-        write_cell(table.rows[0].cells[i], text, widths[i], bold=True, color="#FFFFFF", right=i in right)
+        write_cell(table.rows[0].cells[i], text, widths[i], size=size, bold=True, color="#FFFFFF", right=i in right)
         style_cell(table.rows[0].cells[i], NAVY, bottom=(12, ORANGE))
+        table.rows[0].cells[i].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
     tints, colors = tints or {}, colors or {}
     for n, values in enumerate(rows):
         cells = table.add_row().cells
         fill = tints.get(n) or ("#F1F3F7" if n in bold_rows else ZEBRA if n % 2 else None)
         for i, value in enumerate(values):
-            badge = badges[1].get(value) if badges and badges[0] == i else None
-            write_cell(cells[i], value, widths[i], bold=n in bold_rows or bool(badge), color=badge[1] if badge else colors.get(i),
-                       right=i in right)
+            badge = badges.get(i, {}).get(value)
+            write_cell(cells[i], value, widths[i], size=size, bold=n in bold_rows or bool(badge),
+                       color=badge[1] if badge else colors.get(i), right=i in right)
+            cells[i].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             if badge or fill:
                 style_cell(cells[i], badge[0] if badge else fill)
     doc.add_paragraph().paragraph_format.space_after = Pt(2)
@@ -739,7 +756,7 @@ def donut(ax, title, parts, unit):
               loc="upper center", bbox_to_anchor=(0.5, 0.04), frameon=False, fontsize=8, handlelength=0.9, handleheight=0.9, labelcolor=INK)
 
 
-def hbars(ax, title, items, colors=ORANGE, limit=7, share=True):
+def hbars(ax, title, items, colors=ORANGE, limit=7, share=True, suffix="", scale=None):
     """Horizontal bars for (label, n) items in the order given. Each bar has its label above it and its
     count (and share of the total, unless the items are not parts of one whole) at its end, so long
     labels never run into the chart beside it."""
@@ -752,7 +769,7 @@ def hbars(ax, title, items, colors=ORANGE, limit=7, share=True):
     if not items:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=9, color=MUTED, transform=ax.transAxes)
         return
-    top = max(n for _label, n in items) or 1
+    top = scale or max(n for _label, n in items) or 1   # `scale` fixes the full width, e.g. 100 for percentages
     slots = max(len(items), 4)   # few bars stay slim instead of filling the panel
     ax.set_xlim(0, top * 1.45)
     ax.set_ylim(slots, 0)
@@ -760,8 +777,31 @@ def hbars(ax, title, items, colors=ORANGE, limit=7, share=True):
         ax.text(0, row + 0.3, label, va="center", fontsize=8, color=INK)
         ax.barh(row + 0.68, top, height=0.26, color="#EEF1F5")
         ax.barh(row + 0.68, n, height=0.26, color=color)
-        ax.text(top * 1.04, row + 0.68, f"{n:,}" + (f"  ({(n / total if total else 0):.0%})" if share else ""), va="center", fontsize=8,
+        ax.text(top * 1.04, row + 0.68, f"{n:,}{suffix}" + (f"  ({(n / total if total else 0):.0%})" if share else ""), va="center", fontsize=8,
                 fontweight="bold", color=NAVY)
+
+
+def stacked(ax, title, rows, series):
+    """Horizontal stacked bars: `rows` are (label, [count per series]) and `series` are (name, colour)."""
+    ax.set_title(title, fontsize=10.5, fontweight="bold", color=NAVY, loc="left", pad=10)
+    ax.axis("off")
+    if not rows:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=9, color=MUTED, transform=ax.transAxes)
+        return
+    top = max(sum(values) for _label, values in rows) or 1
+    ax.set_xlim(0, top * 1.3)
+    ax.set_ylim(max(len(rows), 4), 0)
+    for row, (label, values) in enumerate(rows):
+        ax.text(0, row + 0.3, label, va="center", fontsize=8, color=INK)
+        ax.barh(row + 0.68, top, height=0.26, color="#EEF1F5")
+        left = 0
+        for n, (_name, color) in zip(values, series):
+            ax.barh(row + 0.68, n, left=left, height=0.26, color=color)
+            left += n
+        ax.text(top * 1.04, row + 0.68, f"{sum(values):,}", va="center", fontsize=8, fontweight="bold", color=NAVY)
+    handles = [ax.bar(0, 0, color=color) for _name, color in series]
+    ax.legend(handles, [name for name, _color in series], loc="upper center", bbox_to_anchor=(0.45, 0.02), ncol=len(series), frameon=False,
+              fontsize=8, handlelength=0.9, handleheight=0.9, columnspacing=1.2, labelcolor=INK)
 
 
 def doc_chart(doc, panels, height=2.75, widths=None):
@@ -793,7 +833,7 @@ def assess(data):
     add = lambda area, finding, rating, advice: out.append((area, finding, rating, advice))  # noqa: E731
     names = lambda items, limit=5: ", ".join(items[:limit]) + (f" and {len(items) - limit} more" if len(items) > limit else "")  # noqa: E731
     if not workloads:
-        add("Data", "No workloads have been synced from the PCE.", "Action", "Press Sync from PCE in the tracker, then download the report again.")
+        add("Data", "No workload data has been read from the PCE.", "Action", "Sync from the PCE, then produce the report again.")
         return out
 
     full = sum(1 for w in vens if w["enforcement_mode"] == "full")
@@ -837,7 +877,7 @@ def assess(data):
         unused = [l["value"] for l in labels if not l["used_by"]]
         if unused:
             add("Unused labels", f"{len(unused):,} of {len(labels):,} labels are not used anywhere: {names(unused)}.", "Attention",
-                "Review the unused labels in section 4 and delete those that are no longer needed.")
+                "Review the unused labels listed in the Label Summary and delete those that are no longer needed.")
         else:
             add("Unused labels", f"All {len(labels):,} labels are in use.", "Good", "No action needed.")
 
@@ -871,10 +911,10 @@ def assess(data):
 
     drift = [r["scope"] for r in pol["rows"] if r["tracked"] and core.PCE_STATE_STATUS.get(r["pce_state"]) != r["status"]]
     if drift:
-        add("Tracker vs PCE", f"{len(drift):,} scope(s) have a tracker status that differs from what the PCE shows: {names(drift)}.", "Attention",
-            "Update the tracker status, or change the enforcement mode in the PCE, so the two agree.")
+        add("Project status vs PCE", f"{len(drift):,} scope(s) have a project status that differs from what the PCE shows: {names(drift)}.", "Attention",
+            "Update the project status, or change the enforcement mode in the PCE, so the two agree.")
     else:
-        add("Tracker vs PCE", "The tracker status of every scope agrees with the PCE.", "Good", "No action needed.")
+        add("Project status vs PCE", "The project status of every scope agrees with the PCE.", "Good", "No action needed.")
 
     tasks, _preds = task_rows(data["tl"], data["projects"])
     leaves = [r for r in tasks if r["kind"] == "task"]
@@ -884,10 +924,77 @@ def assess(data):
         done = sum(1 for r in leaves if r["status"] == "Completed")
         if late:
             add("Project plan", f"{len(late):,} of {len(leaves):,} tasks are past their end date and not completed: {names(late)}.", "Action",
-                "Replan the overdue tasks or close them out on the Project Timeline.")
+                "Replan the overdue tasks or close them out in the project plan.")
         else:
             add("Project plan", f"No task is overdue; {done:,} of {len(leaves):,} tasks are completed.", "Good", "No action needed.")
     return out
+
+
+LOGO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "logo.png")
+
+
+def logo_png():
+    """The logo for the cover page. static/logo.png is used when it exists (drop the official artwork
+    there); otherwise the tracker's own mark, the one in the app's sidebar, is drawn."""
+    if os.path.exists(LOGO_FILE):
+        return LOGO_FILE
+    fig = Figure(figsize=(2, 2), dpi=220)
+    FigureCanvasAgg(fig)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(2, 30)
+    ax.set_ylim(30, 2)
+    ax.axis("off")
+    for x0, x1, x2 in ((4, 12, 7.5), (28, 20, 24.5)):   # the two brackets
+        ax.fill([x0, x1, x1, x2, x2, x1, x1, x0], [4, 4, 7.5, 7.5, 24.5, 24.5, 28, 28], color=ORANGE, linewidth=0)
+    for xs in ((11, 21), (21, 11)):                      # the cross between them
+        ax.plot(xs, (11, 21), color=ORANGE, linewidth=13, solid_capstyle="round")
+    stream = io.BytesIO()
+    fig.savefig(stream, format="png", transparent=True)
+    stream.seek(0)
+    return stream
+
+
+def fmt_date(iso):
+    return day(iso).strftime("%b %-d, %Y") if iso else "—"
+
+
+def lead(doc, text):
+    """The sentence under a section heading that says what the section shows."""
+    par = doc.add_paragraph(text)
+    par.paragraph_format.space_after = Pt(10)
+    par.runs[0].font.size = Pt(10.5)
+    par.runs[0].font.color.rgb = rgb("#374151")
+
+
+def callout(doc, title, lines, accent=ORANGE, fill=ZEBRA, bullets=True):
+    """A tinted box with a coloured bar on its left: a title, then one bullet (or plain paragraph) per line."""
+    table, widths = fixed_table(doc, 1, [1])
+    cell = table.rows[0].cells[0]
+    par = write_cell(cell, title, widths[0], size=11, bold=True, color=NAVY)
+    par.paragraph_format.space_before = Pt(6)
+    par.paragraph_format.space_after = Pt(4)
+    par.paragraph_format.left_indent = Inches(0.15)
+    for n, line in enumerate(lines):
+        par = cell.add_paragraph()
+        par.paragraph_format.left_indent = Inches(0.15)
+        par.paragraph_format.space_after = Pt(6 if n == len(lines) - 1 else 3)
+        head, _sep, rest = line.partition(": ")
+        if not bullets:
+            par.add_run(line).font.size = Pt(10)
+        elif rest:
+            run = par.add_run(f"•  {head}: ")
+            run.bold = True
+            run.font.size = Pt(10)
+            par.add_run(rest).font.size = Pt(10)
+        else:
+            par.add_run(f"•  {line}").font.size = Pt(10)
+    style_cell(cell, fill, left=(36, accent))
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+
+def progress_bar(percent, blocks=12):
+    done = round(percent / 100 * blocks)
+    return "█" * done + "░" * (blocks - done)
 
 
 FORM_LINE = "#9AA5B6"   # form tables get darker lines than data tables, so empty cells still read as boxes
@@ -913,19 +1020,29 @@ def form_fields(doc, rows, height=0.34):
     doc.add_paragraph().paragraph_format.space_after = Pt(2)
 
 
-def form_box(doc, height):
-    """An empty bordered box for free text."""
+def form_box(doc, height, text=""):
+    """A bordered box for free text: empty to write in, or holding what the consultant entered."""
     table, widths = fixed_table(doc, 1, [1])
     grid_lines(table, FORM_LINE)
     table.rows[0].height = Inches(height)
-    write_cell(table.rows[0].cells[0], "", widths[0], size=10)
+    cell = table.rows[0].cells[0]
+    for n, line in enumerate(text.split("\n") if text else [""]):
+        par = write_cell(cell, line, widths[0], size=10) if n == 0 else cell.add_paragraph()
+        if n:
+            par.add_run(line).font.size = Pt(10)
+        par.paragraph_format.space_after = Pt(4)
     doc.add_paragraph().paragraph_format.space_after = Pt(2)
 
 
-def form_grid(doc, headers, widths, blank_rows, height=0.42, numbered=True):
-    """A table with the usual navy header and empty rows to fill in."""
-    rows = [[n + 1 if numbered else ""] + [""] * (len(headers) - 1) for n in range(blank_rows)]
-    table = doc_table(doc, headers, rows, widths, tints={n: "#FFFFFF" for n in range(blank_rows)}, colors={0: MUTED})
+def form_grid(doc, headers, widths, blank_rows, height=0.42, numbered=True, filled=None, badges=None):
+    """A table with the usual navy header and rows to fill in. `filled` are rows the consultant already
+    entered (without the number column); when there are any, no empty rows are added."""
+    if filled:
+        rows = [([n + 1] if numbered else []) + list(values) for n, values in enumerate(filled)]
+    else:
+        rows = [[n + 1 if numbered else ""] + [""] * (len(headers) - 1) for n in range(blank_rows)]
+    table = doc_table(doc, headers, rows, widths, tints={n: "#FFFFFF" for n in range(len(rows))}, colors={0: MUTED}, badges=badges,
+                      size=9)
     grid_lines(table, FORM_LINE)
     for row in table.rows[1:]:
         row.height = Inches(height)
@@ -943,14 +1060,14 @@ def doc_theme(doc, data):
     doc.styles["Normal"].font.name = "Calibri"
     doc.styles["Normal"].font.size = Pt(10)
     doc.styles["Normal"].font.color.rgb = rgb(INK)
-    for name, size, color, before in (("Heading 1", 16, NAVY, 16), ("Heading 2", 12, ORANGE, 10)):
+    for name, size, color, before in (("Heading 1", 20, NAVY, 0), ("Heading 2", 13, ORANGE, 14)):
         style = doc.styles[name]
         style.font.name = "Calibri"
         style.font.size = Pt(size)
         style.font.bold = True
         style.font.color.rgb = rgb(color)
         style.paragraph_format.space_before = Pt(before)
-        style.paragraph_format.space_after = Pt(6)
+        style.paragraph_format.space_after = Pt(8 if name == "Heading 1" else 6)
         fonts = style.element.rPr.find(qn("w:rFonts"))
         for attr in ("asciiTheme", "hAnsiTheme"):   # the template's theme font would win over the name set above
             fonts.attrib.pop(qn(f"w:{attr}"), None)
@@ -961,26 +1078,40 @@ def doc_theme(doc, data):
     rule.append(line)
     doc.styles["Heading 1"].element.pPr.find(qn("w:spacing")).addprevious(rule)
 
+    doc.styles["Heading 1"].paragraph_format.page_break_before = True   # each section opens a page
+
+    header = section.header.paragraphs[0]
+    for text, size, color, bold in (("illumio", 12, ORANGE, True), ("    Enforcement Summary Report", 9, MUTED, False)):
+        run = header.add_run(text)
+        run.font.size, run.bold = Pt(size), bold
+        run.font.color.rgb = rgb(color)
+    edge = OxmlElement("w:pBdr")
+    under = OxmlElement("w:bottom")
+    for attr, value in (("val", "single"), ("sz", "6"), ("space", "6"), ("color", GRID.lstrip("#"))):
+        under.set(qn(f"w:{attr}"), value)
+    edge.append(under)
+    header._p.get_or_add_pPr().append(edge)
+
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    footer.add_run(f"illumio  ·  Enforcement Summary  ·  PCE {data['pce']}  ·  Page ")
-    for kind in ("begin", "PAGE", "end"):
-        run = footer.add_run()
-        part = OxmlElement("w:instrText" if kind == "PAGE" else "w:fldChar")
-        if kind == "PAGE":
-            part.text = kind
-        else:
-            part.set(qn("w:fldCharType"), kind)
-        run._r.append(part)
+    customer = data["consultant"]["customer"]
+    footer.add_run((f"Prepared for {customer}  ·  " if customer else "") + f"PCE {data['pce']}  ·  Page ")
+    field(footer, "PAGE", None, wrap=True)
+    footer.add_run(" of ")
+    field(footer, "NUMPAGES", None, wrap=True)
     for run in footer.runs:
         run.font.size = Pt(8)
         run.font.color.rgb = rgb(MUTED)
+    section.different_first_page_header_footer = True   # neither on the cover page
 
-    section.different_first_page_header_footer = True   # no footer on the cover page
 
-
-def field(par, code, kind):
-    """One piece of a Word field in its own run: "begin", "separate" and "end" markers, or the field code."""
+def field(par, code, kind, wrap=False):
+    """One piece of a Word field in its own run: "begin", "separate" and "end" markers, or the field code.
+    `wrap` writes a whole simple field (begin, code, end) such as PAGE."""
+    if wrap:
+        field(par, None, "begin")
+        field(par, f" {code} ", None)
+        return field(par, None, "end")
     run = par.add_run()
     part = OxmlElement("w:fldChar" if kind else "w:instrText")
     if kind:
@@ -1001,16 +1132,17 @@ def doc_front(doc, details):
 
     # ---- cover
     cover, widths = fixed_table(doc, 1, [1])
-    cover.rows[0].height = Inches(3.5)
+    cover.rows[0].height = Inches(3.7)
     cell = cover.rows[0].cells[0]
     cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-    for n, (text, size, color, bold) in enumerate((("illumio", 46, ORANGE, True), ("Enforcement Summary Report", 30, "#FFFFFF", True),
+    for n, (text, size, color, bold) in enumerate((("  illumio", 46, ORANGE, True), ("Enforcement Summary Report", 30, "#FFFFFF", True),
                                                    ("Plan. Track. Enforce.", 13, "#C8D1E0", False))):
-        par = write_cell(cell, text, widths[0], size=size, bold=bold, color=color) if n == 0 else cell.add_paragraph()
-        if n:
-            run = par.add_run(text)
-            run.font.size, run.bold = Pt(size), bold
-            run.font.color.rgb = rgb(color)
+        par = write_cell(cell, "", widths[0]) if n == 0 else cell.add_paragraph()
+        if n == 0:
+            par.add_run().add_picture(logo_png(), height=Inches(0.62))
+        run = par.add_run(text)
+        run.font.size, run.bold = Pt(size), bold
+        run.font.color.rgb = rgb(color)
         par.paragraph_format.left_indent = Inches(0.45)
         par.paragraph_format.space_after = Pt(4)
     style_cell(cell, NAVY, bottom=(48, ORANGE))
@@ -1061,137 +1193,167 @@ def doc_front(doc, details):
 
     for element in list(body)[mark:-1]:
         first.addprevious(element)
-    for par in doc.paragraphs:   # the first section starts on the page after the contents
-        if par.style.name == "Heading 1":
-            par.paragraph_format.page_break_before = True
-            break
-
-
-def workload_groups(workloads, key, blank, extra=None):
-    """One row per value of `key`: workloads, managed, unmanaged, online and VENs per enforcement mode."""
-    groups = {}
-    for w in workloads:
-        groups.setdefault(w[key] or "", []).append(w)
-    rows = []
-    for name, items in sorted(groups.items(), key=lambda kv: (kv[0] == "", -len(kv[1]), kv[0].lower())):
-        managed = [w for w in items if w["managed"]]
-        rows.append([name or blank] + ([extra(items)] if extra else []) + [len(items), len(managed), len(items) - len(managed),
-                    sum(1 for w in items if w["online"])] + [sum(1 for w in managed if w["enforcement_mode"] == m) for m in MODE_NAMES])
-    return rows
 
 
 def build_docx(data):
-    """The enforcement summary as an Illumio-themed Word document: PCE, VENs, workloads and labels as
-    of the last sync, then policy and blocked traffic by scope, the applications and the project plan."""
+    """The enforcement summary as an Illumio-themed Word document for the customer: cover, contents,
+    executive summary, the PCE, VENs and workloads, labels, policy and blocked traffic by scope, the
+    applications, an assessment, and the consultant's recommendations (as entered on the Reports page,
+    or as an empty form)."""
     doc = docx.Document()
     doc_theme(doc, data)
-    people, pol, conf = data["people"], data["policy"], data["conf"]
+    pol, conf, consultant = data["policy"], data["conf"], data["consultant"]
     info, t = pol["info"], pol["totals"]
     pce = info.get("pce") or {}
     types = pce.get("label_types") or {}
+    traffic = info.get("traffic") or {}
+    days = traffic.get("days", policy.TRAFFIC_DAYS)
     workloads, labels = data["workloads"], data["labels"]
     vens = [w for w in workloads if w["managed"]]
     unused = [l for l in labels if not l["used_by"]]
     active = [a for a in data["apps"] if not a["excluded"]]
+    scopes = [(a, e) for a in active for e in ([e for e in a["environments"] if not e["excluded"]] or [None])]
     projects = ", ".join(p["name"] for p in data["projects"]) or "All Projects"
+    synced = datetime.datetime.strptime(data["last_sync"], "%Y-%m-%dT%H:%M:%SZ") if data["last_sync"] else None
+    synced_text = synced.strftime("%b %-d, %Y %-I:%M %p UTC") if synced else "Never"
+    share = lambda n, total: f"{(n / total if total else 0):.1%}"  # noqa: E731
     by_key = lambda key: sum(1 for l in labels if l["key"] == key)  # noqa: E731
+    in_mode = lambda mode: sum(1 for w in vens if w["enforcement_mode"] == mode)  # noqa: E731
+    with_status = lambda s_: sum(1 for a in active if a["status"] == s_)  # noqa: E731
+    suspended = sum(1 for w in vens if w["ven_status"] == "suspended")
+    online = sum(1 for w in vens if w["online"] and w["ven_status"] != "suspended")
+    offline = len(vens) - online - suspended
+    findings = assess(data)
+    mode_parts = [(name, in_mode(mode), MODE_COLORS[mode]) for mode, name in MODE_NAMES.items()]
+    status_parts = [(s_, with_status(s_), STATUS_COLOR[s_]) for s_ in APP_STATUSES]
+    env_progress = {}
+    for _a, e in scopes:
+        if e:
+            env_progress.setdefault(e["name"], []).append(e["progress"])
+    completion = [(name, round(sum(v) / len(v))) for name, v in sorted(env_progress.items())]
+
+    # ---- Executive summary
+    doc.add_heading("Executive Summary", level=1)
+    lead(doc, f"This report summarises the Illumio enforcement programme on PCE {data['pce']} as of {synced_text}. "
+              f"{in_mode('full'):,} of {len(vens):,} VENs ({share(in_mode('full'), len(vens))}) are in full enforcement, and "
+              f"{with_status('Fully Enforced'):,} of {len(active):,} tracked applications are fully enforced.")
+    doc_tiles(doc, [("Applications", len(active)), ("Fully Enforced", with_status("Fully Enforced"), "#146C36"), ("VENs", len(vens)),
+                    ("VENs in Full Enforcement", share(in_mode("full"), len(vens))),
+                    ("Potentially Blocked Flows", t["potentially_blocked_flows"]), ("Blocked Flows", t["blocked_flows"])])
+    doc_chart(doc, [lambda ax: donut(ax, "Applications by Status", status_parts, "applications"),
+                    lambda ax: donut(ax, "VENs by Enforcement Mode", mode_parts, "VENs"),
+                    lambda ax: hbars(ax, "Completion by Environment", completion, share=False, suffix="%", scale=100)],
+              height=3.1, widths=[1, 1, 1.2])
+    if consultant["executive_summary"]:
+        callout(doc, "Consultant's Summary", consultant["executive_summary"].split("\n"), bullets=False)
+    key = [f for f in findings if f[2] != "Good"]
+    key.sort(key=lambda f: f[2] != "Action")
+    if key:
+        callout(doc, "Key Findings", [f"{area}: {finding}" for area, finding, _rating, _advice in key[:6]])
+    else:
+        callout(doc, "Key Findings", ["No outstanding findings: every area assessed is in good standing."], accent="#17994F")
 
     # ---- 1. PCE
     doc.add_heading("1. PCE Information Summary", level=1)
+    lead(doc, "The Policy Compute Engine this report was produced from, and what it manages.")
     doc_tiles(doc, [("Workloads", len(workloads)), ("VENs", len(vens)), ("Unmanaged", len(workloads) - len(vens)),
                     ("Applications", by_key("app") if labels else len(data["apps"])), ("Environments", by_key("env")),
                     ("Labels", len(labels)), ("Rulesets", t["rulesets"]), ("Rules Provisioned", t["rules_active"])])
-    cluster = "  ·  ".join(x for x in ((pce.get("status") or "").capitalize(), pce.get("cluster_type") or "",
-                                       f"{pce['nodes']} node(s)" if pce.get("nodes") else "") if x)
-    traffic = info.get("traffic") or {}
-    online = sum(1 for w in vens if w["online"])
     doc_chart(doc, [
         lambda ax: donut(ax, "Workloads", [("Managed by a VEN", len(vens), NAVY), ("Unmanaged", len(workloads) - len(vens), ORANGE)], "workloads"),
-        lambda ax: donut(ax, "VENs", [("Online", online, "#17994F"), ("Offline", len(vens) - online, "#D03B3B")], "VENs"),
+        lambda ax: donut(ax, "VENs", [("Online", online, "#17994F"), ("Offline", offline, "#D03B3B"), ("Suspended", suspended, "#E39B00")], "VENs"),
         lambda ax: donut(ax, "Labels", [("In use", len(labels) - len(unused), NAVY), ("Unused", len(unused), ORANGE)], "labels"),
         lambda ax: hbars(ax, f"Policy ({t['rulesets']:,} rulesets)",
                          [("Rules in draft", t["rules_draft"]), ("Rules provisioned", t["rules_active"]),
                           ("Draft not provisioned", t["rules_pending"])], [NAVY, "#17994F", ORANGE], share=False),
-        lambda ax: hbars(ax, f"Blocked Traffic ({traffic.get('days', policy.TRAFFIC_DAYS)} days)",
+        lambda ax: hbars(ax, f"Blocked Traffic ({days} days)",
                          [("Potentially blocked flows", t["potentially_blocked_flows"]), ("Blocked flows", t["blocked_flows"])],
                          ["#E39B00", "#D03B3B"]),
     ], height=2.7, widths=[1, 1, 1, 1.15, 1.15])
-    synced = datetime.datetime.strptime(data["last_sync"], "%Y-%m-%dT%H:%M:%SZ") if data["last_sync"] else None
-    facts = [
-        ["PCE", data["pce"]],
-        ["Address", f"{conf.get('pce_fqdn', '')}:{conf.get('port', 443)}" if conf.get("pce_fqdn") else ""],
-        ["Organization", conf.get("org", 1)],
-        ["PCE version", pce.get("version") or "Not read yet"],
-        ["Cluster health", cluster or "Not available to this API key"],
-        ["Last sync", synced.strftime("%b %-d, %Y %-I:%M %p UTC") if synced else "Never"],
-        ["Project", projects],
-        ["Report generated", datetime.datetime.now().strftime("%b %-d, %Y %-I:%M %p")],
-    ]
-    doc_table(doc, ["Item", "Value"], [[k, str(v)] for k, v in facts], [2.4, 7.4])
-    note(doc, "Sections 1 to 4 describe the whole PCE as of the last sync, including applications excluded from tracking.")
+    cluster = "  ·  ".join(x for x in ((pce.get("status") or "").capitalize(), pce.get("cluster_type") or "",
+                                       f"{pce['nodes']} node(s)" if pce.get("nodes") else "") if x)
+    address = f"{conf.get('pce_fqdn', '')}:{conf.get('port', 443)}" if conf.get("pce_fqdn") else ""
+    doc_table(doc, ["Item", "Value"], [["PCE", data["pce"]], ["Address", address], ["Organization", str(conf.get("org", 1))],
+                                       ["PCE version", pce.get("version") or "Not available"], ["Cluster health", cluster or "Not available"],
+                                       ["Data as of", synced_text], ["Project", projects]], [2.4, 7.4])
+    note(doc, "Sections 1 to 3 describe the whole PCE, including applications that are outside the scope of the enforcement project.")
 
-    # ---- 2. VENs
-    doc.add_heading("2. VEN Summary", level=1)
-    if not vens:
-        doc.add_paragraph("No VENs to show yet. Sync from the PCE first.")
-    else:
-        versions = sorted(tally(vens, "ven_version", "Unknown"), key=lambda kv: version_key(kv[0]), reverse=True)
-        doc_tiles(doc, [("VENs", len(vens)), ("Online", online), ("Offline", len(vens) - online, WARN if len(vens) > online else ORANGE),
-                        ("Full Enforcement", sum(1 for w in vens if w["enforcement_mode"] == "full")),
-                        ("Visibility Only", sum(1 for w in vens if w["enforcement_mode"] == "visibility_only")),
-                        ("VEN Versions", len(versions))])
-        doc.add_heading("Enforcement Mode, VEN Versions and Operating Systems", level=2)
-        doc_chart(doc, [
-            lambda ax: donut(ax, "Enforcement Mode", [(name, sum(1 for w in vens if w["enforcement_mode"] == mode), MODE_COLORS[mode])
-                                                      for mode, name in MODE_NAMES.items()], "VENs"),
-            lambda ax: hbars(ax, "VEN Versions", versions, NAVY),
-            lambda ax: hbars(ax, "Operating Systems", tally(vens, "os", "Unknown")),
-        ], height=3.2, widths=[1, 1.25, 1.25])
-        doc.add_heading("VEN Status", level=2)
-        share_table(doc, "Status", "VENs", [(name.capitalize(), n) for name, n in tally(vens, "ven_status", "Unknown")])
-        doc.add_heading("VENs by Application", level=2)
-        groups = {}
-        for w in vens:
-            groups.setdefault(w["application"] or "", []).append(w)
-        rows = []
-        for name, items in sorted(groups.items(), key=lambda kv: (kv[0] == "", kv[0].lower())):
-            rows.append([name or "(no application label)", len(items)]
-                        + [sum(1 for w in items if w["enforcement_mode"] == m) for m in MODE_NAMES]
-                        + [sum(1 for w in items if w["online"]), sum(1 for w in items if not w["online"]),
-                           ", ".join(sorted({w["ven_version"] or "Unknown" for w in items}, key=version_key, reverse=True)),
-                           ", ".join(sorted({w["environment"] for w in items if w["environment"]}))])
-        doc_table(doc, ["Application", "VENs", "Full", "Selective", "Visibility Only", "Idle", "Online", "Offline",
-                        "VEN Versions", "Environments"],
-                  rows, [2.4, 0.55, 0.5, 0.7, 0.8, 0.45, 0.6, 0.6, 2.0, 1.4], right=range(1, 8))
-
-    # ---- 3. Workloads
-    doc.add_heading("3. Workload Summary", level=1)
+    # ---- 2. VENs and workloads
+    doc.add_heading("2. VENs & Workloads", level=1)
+    lead(doc, "Deployment, version currency and connectivity of the VEN fleet.")
     if not workloads:
-        doc.add_paragraph("No workloads to show yet. Sync from the PCE first.")
+        doc.add_paragraph("No workload data is available yet.")
     else:
-        counts = ["Workloads", "Managed", "Unmanaged", "Online", "Full", "Selective", "Visibility Only", "Idle"]
-        narrow = [0.85, 0.8, 0.9, 0.7, 0.55, 0.75, 0.8, 0.5]
-        doc.add_heading("By Application", level=2)
-        envs_of = lambda items: ", ".join(sorted({w["environment"] for w in items if w["environment"]}))  # noqa: E731
-        doc_table(doc, ["Application", "Environments"] + counts, workload_groups(workloads, "application", "(no application label)", envs_of),
-                  [2.4, 1.55] + narrow, right=range(2, 10))
-        doc.add_heading("By Environment", level=2)
-        doc_table(doc, ["Environment"] + counts, workload_groups(workloads, "environment", "(no environment label)"), [3.95] + narrow,
-                  right=range(1, 9))
-        note(doc, "Managed workloads have a VEN; the enforcement mode columns count those. Online is as the PCE reported it at the last sync.")
+        by_type = [(name.capitalize(), n) for name, n in tally(vens, "ven_type", "unknown")]
+        versions = sorted(tally(vens, "ven_version", "Unknown"), key=lambda kv: version_key(kv[0]), reverse=True)
+        doc_table(doc, ["Measure", "Value", "Detail"], [
+            ["Deployed VENs", len(vens), ", ".join(f"{n:,} {name.lower()}" for name, n in by_type)],
+            ["Online", online, share(online, len(vens))],
+            ["Offline", offline, share(offline, len(vens)) if offline else ""],
+            ["Suspended", suspended, share(suspended, len(vens)) if suspended else ""],
+            ["Unmanaged workloads", len(workloads) - len(vens), f"{share(len(workloads) - len(vens), len(workloads))} of {len(workloads):,} workloads"],
+            ["VEN versions in use", len(versions), f"Newest: {versions[0][0]}" if versions else ""],
+        ], [3.2, 1.3, 5.3], right=(1,), colors={1: NAVY})
+        doc_table(doc, ["Measure", "Value", "Detail"],
+                  [[name.replace(" Enforcement", "").capitalize() + " enforcement", n, share(n, len(vens))] for name, n, _color in mode_parts],
+                  [3.2, 1.3, 5.3], right=(1,), colors={1: NAVY})
+        type_rows = [(name, [sum(1 for w in vens if (w["ven_type"] or "unknown").capitalize() == name and state(w)) for state in (
+            lambda w: w["online"] and w["ven_status"] != "suspended",
+            lambda w: not w["online"] and w["ven_status"] != "suspended",
+            lambda w: w["ven_status"] == "suspended")]) for name, _n in by_type]
+        type_colors = [NAVY, ORANGE, "#2A78D6", "#8A94A6", "#17994F"]
+        doc_chart(doc, [
+            lambda ax: donut(ax, "VENs by Type", [(name, n, type_colors[i % len(type_colors)]) for i, (name, n) in enumerate(by_type)], "VENs"),
+            lambda ax: stacked(ax, "VEN Status by Type", type_rows, [("Online", "#17994F"), ("Offline", "#D03B3B"), ("Suspended", "#E39B00")]),
+            lambda ax: donut(ax, "Enforcement Mode", mode_parts, "VENs"),
+        ], height=3.2, widths=[1, 1.25, 1])
+        doc_chart(doc, [lambda ax: hbars(ax, "VEN Versions", versions, NAVY),
+                        lambda ax: hbars(ax, "Operating Systems", tally(vens, "os", "Unknown"))], height=2.9)
 
-    # ---- 4. Labels
-    doc.add_heading("4. Label Summary", level=1)
+        def group_rows(key, blank, by_app):
+            groups = {}
+            for w in workloads:
+                groups.setdefault(w[key] or "", []).append(w)
+            rows = []
+            for name, items in sorted(groups.items(), key=lambda kv: (kv[0] == "", -len(kv[1]), kv[0].lower())):
+                mine = [w for w in items if w["managed"]]
+                up = sum(1 for w in mine if w["online"] and w["ven_status"] != "suspended")
+                rows.append([name or blank]
+                            + ([", ".join(sorted({w["environment"] for w in items if w["environment"]}))] if by_app else [])
+                            + [len(items), len(mine), len(items) - len(mine), up, len(mine) - up]
+                            + [sum(1 for w in mine if w["enforcement_mode"] == m) for m in MODE_NAMES]
+                            + ([", ".join(sorted({w["ven_version"] for w in mine if w["ven_version"]}, key=version_key, reverse=True))] if by_app else []))
+            return rows
+
+        counts = ["Workloads", "VENs", "Unmanaged", "Online", "Offline", "Full", "Selective", "Visibility Only", "Idle"]
+        narrow = [0.8, 0.55, 0.85, 0.6, 0.6, 0.45, 0.7, 0.75, 0.45]
+        doc.add_heading("By Application", level=2)
+        doc_table(doc, ["Application", "Environments"] + counts + ["VEN Versions"], group_rows("application", "(no application label)", True),
+                  [1.9, 1.05] + narrow + [1.4], right=range(2, 11))
+        doc.add_heading("By Environment", level=2)
+        doc_table(doc, ["Environment"] + counts, group_rows("environment", "(no environment label)", False), [4.05] + narrow, right=range(1, 10))
+        note(doc, "Online, Offline and the enforcement mode columns count VENs. Unmanaged workloads have no VEN and cannot be enforced by the PCE.")
+
+    # ---- 3. Labels
+    doc.add_heading("3. Label Summary", level=1)
+    lead(doc, "The labels defined in the PCE, how they are used, and which ones are no longer used by anything.")
     if not labels:
-        doc.add_paragraph("Labels have not been read yet. Press Sync from PCE in the tracker.")
+        doc.add_paragraph("No label data is available yet.")
     else:
         type_name = lambda key: types.get(key) or key  # noqa: E731
+        keys = sorted({l["key"] for l in labels}, key=lambda k: type_name(k).lower())
         doc_tiles(doc, [("Labels", len(labels)), ("In Use", len(labels) - len(unused)),
                         ("Unused", len(unused), WARN if unused else ORANGE),
-                        ("On Workloads", sum(1 for l in labels if l["workload_count"])), ("Label Types", len({l["key"] for l in labels}))])
+                        ("On Workloads", sum(1 for l in labels if l["workload_count"])), ("Label Types", len(keys))])
+        per_type = sorted(((type_name(k), by_key(k)) for k in keys), key=lambda kv: -kv[1])
+        doc_chart(doc, [lambda ax: hbars(ax, "Labels by Type", per_type, NAVY),
+                        lambda ax: donut(ax, "Label Usage", [("In use", len(labels) - len(unused), NAVY), ("Unused", len(unused), ORANGE)], "labels"),
+                        lambda ax: hbars(ax, "Unused Labels by Type",
+                                         [(type_name(k), sum(1 for l in unused if l["key"] == k)) for k in keys
+                                          if any(l["key"] == k for l in unused)])], height=3.2, widths=[1.2, 1, 1.2])
         doc.add_heading("Labels by Type", level=2)
         rows, tints = [], {}
-        for key in sorted({l["key"] for l in labels}, key=lambda k: type_name(k).lower()):
+        for key in keys:
             mine = [l for l in labels if l["key"] == key]
             idle = sum(1 for l in mine if not l["used_by"])
             if idle:
@@ -1202,132 +1364,193 @@ def build_docx(data):
                   [3.0, 1.4, 1.2, 1.4, 1.6, 1.2], right=range(2, 6), tints=tints, colors={5: WARN})
         doc.add_heading("Unused Labels", level=2)
         if unused:
-            par = doc.add_paragraph()
-            run = par.add_run(f"{len(unused):,} label(s) are not used anywhere in the PCE")
-            run.bold = True
-            run.font.color.rgb = rgb(WARN)
-            par.add_run(": no workload carries them and no ruleset, label group, pairing profile or other object refers to them. "
-                        "They can be reviewed for removal.")
+            callout(doc, f"{len(unused):,} label(s) are not used anywhere in the PCE",
+                    ["No workload carries them and no ruleset, label group, pairing profile or other object refers to them. "
+                     "They can be reviewed for removal."], accent=WARN, fill=TINT, bullets=False)
             doc_table(doc, ["Label Type", "Key", "Unused Label"], [[type_name(l["key"]), l["key"], l["value"]] for l in unused],
                       [3.0, 1.4, 5.4], tints={n: TINT for n in range(len(unused))}, colors={2: WARN})
         else:
-            doc.add_paragraph("Every label is in use.")
+            callout(doc, "Every label is in use", ["No clean-up is needed."], accent="#17994F", bullets=False)
         doc.add_heading("All Labels", level=2)
         rows = [[type_name(l["key"]), l["value"], l["workload_count"],
                  ", ".join(USED_BY.get(u, u.replace("_", " ").capitalize()) for u in l["used_by"].split(",") if u),
                  "In use" if l["used_by"] else "Unused"] for l in labels]
         doc_table(doc, ["Label Type", "Label", "Workloads", "Used By", "Status"], rows, [1.9, 2.6, 0.9, 3.4, 1.0], right=(2,),
-                  tints={n: TINT for n, l in enumerate(labels) if not l["used_by"]})
-        note(doc, "Unused labels are highlighted. Usage is what the PCE reports for each label, plus the workloads seen at the last sync.")
+                  tints={n: TINT for n, l in enumerate(labels) if not l["used_by"]}, badges={4: {"Unused": (TINT, WARN)}})
+        note(doc, "Unused labels are highlighted. Usage is as reported by the PCE for each label.")
 
-    # ---- 5. Policy and traffic
-    doc.add_heading("5. Policy and Blocked Traffic by Scope", level=1)
-    doc.add_paragraph(
-        f"The PCE holds {t['rulesets']:,} rulesets with {t['rules_draft']:,} rules in draft and {t['rules_active']:,} provisioned; "
-        f"{t['rules_pending']:,} draft changes are not provisioned yet. It reported {t['potentially_blocked_flows']:,} potentially "
-        f"blocked flows ({t['potentially_blocked_connections']:,} connections) and {t['blocked_flows']:,} blocked flows "
-        f"({t['blocked_connections']:,} connections).")
+    # ---- 4. Policy and traffic
+    doc.add_heading("4. Policy and Blocked Traffic by Scope", level=1)
+    lead(doc, f"The rules written for each application and environment, and the traffic the PCE reported as blocked or "
+              f"potentially blocked over the last {days} days.")
+    doc_tiles(doc, [("Rulesets", t["rulesets"]), ("Rules in Draft", t["rules_draft"]), ("Rules Provisioned", t["rules_active"]),
+                    ("Draft Not Provisioned", t["rules_pending"], WARN if t["rules_pending"] else ORANGE),
+                    ("Potentially Blocked Flows", t["potentially_blocked_flows"]), ("Blocked Flows", t["blocked_flows"])])
+    tracked = [r for r in pol["rows"] if r["tracked"]]
+    top = lambda key: [(r["scope"], r[key]) for r in sorted(tracked, key=lambda r: -(r[key] or 0)) if r[key]]  # noqa: E731
+    doc_chart(doc, [lambda ax: hbars(ax, "Potentially Blocked Flows by Scope", top("potentially_blocked_flows"), "#E39B00", limit=6),
+                    lambda ax: hbars(ax, "Blocked Flows by Scope", top("blocked_flows"), "#D03B3B", limit=6),
+                    lambda ax: hbars(ax, "Provisioned Rules by Scope", top("rules_active"), NAVY, limit=6)], height=3.3)
     rows = [[r["scope"], r["status"], r["pce_state"]] + [r[k] for k in POLICY_COUNTS] for r in pol["rows"]]
     rows.append(["PCE total", "", ""] + [t[k] for k in POLICY_COUNTS])
-    doc_table(doc, ["Scope", "Tracker Status", "PCE Enforcement", "Rulesets", "Rules in Draft", "Rules Provisioned", "Draft Not Provisioned",
+    status_badges = {s_: (STATUS_TINT[s_], STATUS_TEXT[s_]) for s_ in APP_STATUSES}
+    doc_table(doc, ["Scope", "Project Status", "PCE Enforcement", "Rulesets", "Rules in Draft", "Rules Provisioned", "Draft Not Provisioned",
                     "Potentially Blocked Flows", "Potentially Blocked Conn.", "Blocked Flows", "Blocked Conn."],
-              rows, [2.4, 1.15, 1.15, 0.65, 0.6, 0.8, 0.8, 0.8, 0.85, 0.6, 0.7], right=range(3, 11), bold_rows={len(rows) - 1})
+              rows, [2.3, 1.2, 1.15, 0.65, 0.6, 0.8, 0.8, 0.8, 0.85, 0.6, 0.75], right=range(3, 11), bold_rows={len(rows) - 1},
+              badges={1: status_badges})
     for text in policy_notes(pol):
         note(doc, text)
 
-    # ---- 6. Applications
-    doc.add_heading("6. Application Enforcement Status", level=1)
+    # ---- 5. Applications
+    doc.add_heading("5. Application Enforcement Status", level=1)
+    lead(doc, "Where each application and environment stands on its way from visibility to full enforcement.")
     total = len(active)
-    tiles = [("Applications", total), ("Environments", sum(1 for a in active for e in a["environments"] if not e["excluded"]))]
+    tiles = [("Applications", total), ("Environments", sum(1 for _a, e in scopes if e))]
     for s_ in ("Fully Enforced", "Selective Enforcement", "In Progress", "Not Started"):
-        n = sum(1 for a in active if a["status"] == s_)
-        tiles.append((s_, f"{n:,}   {(n / total if total else 0):.0%}"))
+        tiles.append((s_, f"{with_status(s_):,}   {(with_status(s_) / total if total else 0):.0%}"))
     doc_tiles(doc, tiles)
+    doc_chart(doc, [lambda ax: donut(ax, "Applications by Status", status_parts, "applications"),
+                    lambda ax: hbars(ax, "Applications by Priority", [(p_, sum(1 for a in active if a["priority"] == p_)) for p_ in PRIORITIES],
+                                     [PRIORITY_COLOR[p_] for p_ in PRIORITIES]),
+                    lambda ax: hbars(ax, "Completion by Environment", completion, share=False, suffix="%", scale=100)],
+              height=3.1, widths=[1, 1.2, 1.2])
     rows = []
-    for a in active:
-        envs = [e for e in a["environments"] if not e["excluded"]]
-        for e in envs or [None]:
-            src = e or a
-            rows.append([a["name"], e["name"] if e else "—", src["priority"], src["status"], f"{src['progress']}%",
-                         src["start_date"] or a["start_date"] or "", src["end_date"] or a["end_date"] or "",
-                         person_name(people, a["ps_id"]), person_name(people, a["pm_id"]), person_name(people, a["owner_id"]),
-                         src["pce_state"]])
+    for a, e in scopes:
+        src = e or a
+        rows.append([a["name"], e["name"] if e else "—", src["priority"], src["status"], f"{src['progress']}%", progress_bar(src["progress"]),
+                     fmt_date(src["start_date"] or a["start_date"]), fmt_date(src["end_date"] or a["end_date"]),
+                     (src["comments"] if e and src["comments"] else a["comments"]) or ""])   # the latest comment
     if rows:
-        doc_table(doc, ["Application", "Environment", "Priority", "Status", "% Complete", "Start", "End", "Assigned PS",
-                        "Project Manager", "App Owner", "PCE Enforcement"],
-                  rows, [1.7, 0.9, 0.7, 1.2, 0.65, 0.75, 0.75, 1.0, 1.05, 1.0, 1.2], right=(4,))
+        doc_table(doc, ["Application", "Environment", "Priority", "Status", "% Complete", "Progress", "Start", "End", "Comments"],
+                  rows, [1.8, 0.95, 0.75, 1.35, 0.7, 1.15, 0.9, 0.9, 2.4], right=(4,), colors={5: ORANGE}, size=8.5,
+                  badges={2: {p_: (PRIORITY_TINT[p_], PRIORITY_COLOR[p_]) for p_ in PRIORITIES}, 3: status_badges})
     else:
-        doc.add_paragraph("No applications to show yet. Sync from the PCE first.")
+        doc.add_paragraph("No applications are being tracked yet.")
 
-    # ---- 7. Project plan
-    doc.add_heading("7. Project Plan", level=1)
-    tasks, _preds = task_rows(data["tl"], data["projects"])
-    rows, bold = [], set()
-    for row in tasks:
-        t_ = row["task"]
-        leaf = row["kind"] == "task"
-        if not leaf:
-            bold.add(len(rows))
-        rows.append([("    " * row["level"]) + row["name"], (t_["environment"] or "") if t_ and leaf else "",
-                     t_["priority"] if leaf else "", person_name(people, t_["ps_id"]) if leaf else "",
-                     row["start"] or "", row["end"] or "", row["duration"] if row["duration"] is not None else "",
-                     f"{row['progress']}%", row["status"]])
-    if rows:
-        doc_table(doc, ["Task / Application", "Environment", "Priority", "Assigned PS", "Start", "End", "Days", "% Complete", "Status"],
-                  rows, [3.6, 1.1, 0.8, 1.3, 0.85, 0.85, 0.55, 0.8, 1.05], right=(6, 7), bold_rows=bold)
-    else:
-        doc.add_paragraph("No project plan yet.")
-
-    # ---- 8. Assessment
-    doc.add_heading("8. Assessment Summary", level=1)
-    findings = assess(data)
+    # ---- 6. Assessment
+    doc.add_heading("6. Assessment Summary", level=1)
+    lead(doc, "An automated health check of the deployment: one finding per area, with a rating and a suggested next step.")
     count = lambda rating: sum(1 for f in findings if f[2] == rating)  # noqa: E731
-    doc_tiles(doc, [("Findings", len(findings)), ("Action", count("Action"), "#B02A2A" if count("Action") else ORANGE),
+    doc_tiles(doc, [("Areas Assessed", len(findings)), ("Action", count("Action"), "#B02A2A" if count("Action") else ORANGE),
                     ("Attention", count("Attention")), ("Good", count("Good"), "#146C36")])
-    doc.add_paragraph(f"Of {len(findings):,} areas assessed, {count('Action'):,} need action, {count('Attention'):,} need attention and "
-                      f"{count('Good'):,} are in good standing.")
     order = {"Action": 0, "Attention": 1, "Good": 2}
     doc_table(doc, ["Area", "Finding", "Rating", "Recommendation"], [list(f) for f in sorted(findings, key=lambda f: order[f[2]])],
-              [1.6, 3.9, 0.8, 3.5], badges=(2, RATINGS))
-    note(doc, "The ratings are applied by fixed rules in the tracker from the numbers in this report, not by a manual review. "
-              "Action: something is broken or late. Attention: work still to do. Good: nothing outstanding.")
+              [1.6, 3.9, 0.8, 3.5], badges={2: RATINGS})
+    note(doc, "Ratings are generated automatically from the data in this report. Action: something is not working or is overdue. "
+              "Attention: work still to do. Good: nothing outstanding.")
 
-    # ---- 9. Consultant recommendations: an empty form, completed by hand or in Word after download
-    doc.add_heading("9. Consultant Recommendations", level=1).paragraph_format.page_break_before = True
-    note(doc, "To be completed by the consultant. Type into the empty cells; add rows with Tab from the last cell of a table.")
+    # ---- 7. Consultant recommendations: what was entered on the Reports page, or an empty form
+    doc.add_heading("7. Consultant Recommendations", level=1)
+    entered = any(consultant[k] for k in CONSULTANT_TEXTS) or any(consultant[k] for k in CONSULTANT_LISTS)
+    if entered:
+        lead(doc, "Observations and recommendations from the consultant's review of this deployment.")
+    else:
+        note(doc, "To be completed by the consultant. Type into the empty cells; add rows with Tab from the last cell of a table.")
     doc.add_heading("Engagement Details", level=2)
-    form_fields(doc, [["Customer", ("PCE", data["pce"]), ("Report date", datetime.date.today().strftime("%b %-d, %Y"))],
-                      ["Consultant", "Role / Company", "Review period"],
-                      ["Customer contact", ("Project", projects), "Next review date"]])
-    doc.add_heading("Executive Summary", level=2)
-    note(doc, "Overall state of the enforcement programme and the main message for stakeholders.")
-    form_box(doc, 1.3)
+    form_fields(doc, [[("Customer", consultant["customer"]), ("PCE", data["pce"]), ("Report date", datetime.date.today().strftime("%b %-d, %Y"))],
+                      [("Consultant", consultant["consultant"]), ("Role / Company", consultant["role_company"]),
+                       ("Review period", consultant["review_period"])],
+                      [("Customer contact", consultant["customer_contact"]), ("Project", projects),
+                       ("Next review date", consultant["next_review_date"])]])
+    if not consultant["executive_summary"]:   # when entered, it is shown in the Executive Summary at the front
+        doc.add_heading("Executive Summary", level=2)
+        note(doc, "Overall state of the enforcement programme and the main message for stakeholders.")
+        form_box(doc, 1.3)
     doc.add_heading("Recommendations", level=2)
-    note(doc, "One row per recommendation. Area: for example VENs, Workloads, Labels, Policy, Traffic, Process. "
-              "Priority: High, Medium or Low. Status: Open, In Progress or Done.")
+    recs = consultant["recommendations"]
+    if not recs:
+        note(doc, "One row per recommendation. Area: for example VENs, Workloads, Labels, Policy, Traffic, Process. "
+                  "Priority: High, Medium or Low. Status: Open, In Progress or Done.")
     form_grid(doc, ["#", "Area", "Observation", "Recommendation", "Priority", "Owner", "Target Date", "Status"],
-              [0.35, 1.1, 2.5, 2.75, 0.7, 1.0, 0.8, 0.8], blank_rows=8)
+              [0.35, 1.1, 2.5, 2.75, 0.7, 1.0, 0.8, 0.8], blank_rows=8,
+              filled=[[r["area"], r["observation"], r["recommendation"], r["priority"], r["owner"],
+                       fmt_date(r["target_date"]) if r["target_date"] else "", r["status"]] for r in recs],
+              badges={4: {"High": RATINGS["Action"], "Medium": RATINGS["Attention"], "Low": ("#E4EFFC", "#2A78D6")}})
     doc.add_heading("Risks and Dependencies", level=2)
-    form_grid(doc, ["#", "Risk or Dependency", "Impact", "Mitigation", "Owner"], [0.35, 3.0, 2.2, 3.05, 1.2], blank_rows=4)
+    form_grid(doc, ["#", "Risk or Dependency", "Impact", "Mitigation", "Owner"], [0.35, 3.0, 2.2, 3.05, 1.2], blank_rows=4,
+              filled=[[r["risk"], r["impact"], r["mitigation"], r["owner"]] for r in consultant["risks"]])
     doc.add_heading("Next Steps", level=2)
-    form_grid(doc, ["#", "Action", "Owner", "Due Date", "Notes"], [0.35, 4.0, 1.4, 1.0, 3.05], blank_rows=5)
+    form_grid(doc, ["#", "Action", "Owner", "Due Date", "Notes"], [0.35, 4.0, 1.4, 1.0, 3.05], blank_rows=5,
+              filled=[[r["action"], r["owner"], fmt_date(r["due_date"]) if r["due_date"] else "", r["notes"]] for r in consultant["next_steps"]])
     doc.add_heading("Additional Notes", level=2)
-    form_box(doc, 1.1)
+    form_box(doc, 1.1, consultant["notes"])
     doc.add_heading("Sign-off", level=2)
     form_grid(doc, ["Role", "Name", "Signature", "Date"], [2.2, 3.0, 3.0, 1.6], blank_rows=3, height=0.5, numbered=False)
-    for row, role in zip(doc.tables[-1].rows[1:], ("Prepared by (Consultant)", "Reviewed by", "Accepted by (Customer)")):
-        run = row.cells[0].paragraphs[0].add_run(role)
-        run.font.size = Pt(8)
-        run.bold = True
-        row.cells[0].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    for row, (role, name) in zip(doc.tables[-1].rows[1:], (("Prepared by (Consultant)", consultant["consultant"]), ("Reviewed by", ""),
+                                                           ("Accepted by (Customer)", ""))):
+        for cell, text, bold in ((row.cells[0], role, True), (row.cells[1], name, False)):
+            run = cell.paragraphs[0].add_run(text)
+            run.font.size = Pt(9)
+            run.bold = bold
 
-    doc_front(doc, [[("PCE", data["pce"]), ("Address", facts[1][1]), ("PCE version", pce.get("version") or "")],
-                    [("Project", projects), ("Last sync", facts[5][1]), ("Report date", datetime.date.today().strftime("%b %-d, %Y"))],
-                    ["Prepared for", "Prepared by", "Document version"]])
+    doc_front(doc, [[("PCE", data["pce"]), ("Address", address), ("PCE version", pce.get("version") or "")],
+                    [("Project", projects), ("Data as of", synced_text), ("Report date", datetime.date.today().strftime("%b %-d, %Y"))],
+                    [("Prepared for", consultant["customer"]), ("Prepared by", consultant["consultant"]),
+                     ("Document version", consultant["document_version"])]])
 
     stream = io.BytesIO()
     doc.save(stream)
     return stream.getvalue()
+
+
+# What the consultant fills in on Reports > Enforcement Summary Report. Kept as one JSON document per
+# PCE: it is free-form report text that is only ever read and written whole.
+CONSULTANT_FIELDS = ("customer", "consultant", "role_company", "customer_contact", "review_period", "next_review_date", "document_version")
+CONSULTANT_TEXTS = ("executive_summary", "notes")
+CONSULTANT_LISTS = {"recommendations": ("area", "observation", "recommendation", "priority", "owner", "target_date", "status"),
+                    "risks": ("risk", "impact", "mitigation", "owner"),
+                    "next_steps": ("action", "owner", "due_date", "notes")}
+CONSULTANT_CHOICES = {"priority": ("", "High", "Medium", "Low"), "status": ("", "Open", "In Progress", "Done")}
+
+
+def clean_consultant(raw):
+    """A complete, bounded copy of a consultant report: unknown keys dropped, empty rows removed."""
+    raw = raw if isinstance(raw, dict) else {}
+    text = lambda value, limit: str(value if value is not None else "").strip()[:limit]  # noqa: E731
+    out = {key: text(raw.get(key), 200) for key in CONSULTANT_FIELDS}
+    out.update({key: text(raw.get(key), 6000) for key in CONSULTANT_TEXTS})
+    for name, columns in CONSULTANT_LISTS.items():
+        rows = []
+        for item in (raw.get(name) if isinstance(raw.get(name), list) else [])[:60]:
+            item = item if isinstance(item, dict) else {}
+            row = {c: text(item.get(c), 1000) for c in columns}
+            for c, allowed in CONSULTANT_CHOICES.items():
+                if c in row and row[c] not in allowed:
+                    raise core.ApiError(f"{c} must be one of: {', '.join(a for a in allowed if a)}")
+            if any(row.values()):
+                rows.append(row)
+        out[name] = rows
+    return out
+
+
+def load_consultant(pid):
+    row = core.con().execute("SELECT content, updated_at FROM consultant_reports WHERE pce_id = ?", (pid,)).fetchone() if pid else None
+    try:
+        saved = json.loads(row["content"]) if row else {}
+    except ValueError:
+        saved = {}
+    return {**clean_consultant(saved), "updated_at": row["updated_at"] if row else ""}
+
+
+@bp.get("/api/reports/consultant")
+def consultant_get():
+    _cfg, name = core.active_pce_name()
+    return jsonify(load_consultant(core.pce_id_for(name)))
+
+
+@bp.put("/api/reports/consultant")
+def consultant_put():
+    _cfg, name = core.active_pce_name()
+    if not name:
+        raise core.ApiError("No PCE is configured - add one in Settings")
+    pid = core.pce_id_for(name, create=True)
+    content = clean_consultant(request.get_json(silent=True))
+    core.con().execute(
+        "INSERT INTO consultant_reports (pce_id, content, updated_at) VALUES (?,?,?) "
+        "ON CONFLICT(pce_id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at",
+        (pid, json.dumps(content), core.now()))
+    core.con().commit()
+    return jsonify(load_consultant(pid))
 
 
 def report_data():

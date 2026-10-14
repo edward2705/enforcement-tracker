@@ -261,3 +261,190 @@ function EnforcementSummary() {
     </>
   );
 }
+
+// Reports > Enforcement Summary Report: the Word document for the customer, and the recommendations
+// the consultant adds to it. What is typed here is saved with the tracker and printed in the document.
+interface RowColumn { key: string; label: string; width: string; kind?: 'text' | 'long' | 'date' | 'select'; options?: string[]; }
+const RECOMMENDATION_COLS: RowColumn[] = [
+  { key: 'area', label: 'Area', width: '11%' }, { key: 'observation', label: 'Observation', width: '24%', kind: 'long' },
+  { key: 'recommendation', label: 'Recommendation', width: '26%', kind: 'long' },
+  { key: 'priority', label: 'Priority', width: '9%', kind: 'select', options: ['High', 'Medium', 'Low'] },
+  { key: 'owner', label: 'Owner', width: '10%' }, { key: 'target_date', label: 'Target Date', width: '10%', kind: 'date' },
+  { key: 'status', label: 'Status', width: '10%', kind: 'select', options: ['Open', 'In Progress', 'Done'] },
+];
+const RISK_COLS: RowColumn[] = [
+  { key: 'risk', label: 'Risk or Dependency', width: '32%', kind: 'long' }, { key: 'impact', label: 'Impact', width: '22%', kind: 'long' },
+  { key: 'mitigation', label: 'Mitigation', width: '32%', kind: 'long' }, { key: 'owner', label: 'Owner', width: '14%' },
+];
+const NEXT_STEP_COLS: RowColumn[] = [
+  { key: 'action', label: 'Action', width: '40%', kind: 'long' }, { key: 'owner', label: 'Owner', width: '15%' },
+  { key: 'due_date', label: 'Due Date', width: '13%', kind: 'date' }, { key: 'notes', label: 'Notes', width: '32%', kind: 'long' },
+];
+const ENGAGEMENT_FIELDS: { key: string; label: string; placeholder?: string }[] = [
+  { key: 'customer', label: 'Customer' }, { key: 'customer_contact', label: 'Customer contact' },
+  { key: 'consultant', label: 'Consultant' }, { key: 'role_company', label: 'Role / Company' },
+  { key: 'review_period', label: 'Review period', placeholder: 'e.g. Oct 1 - Oct 31, 2026' },
+  { key: 'next_review_date', label: 'Next review date', placeholder: 'e.g. Nov 30, 2026' },
+  { key: 'document_version', label: 'Document version', placeholder: 'e.g. 1.0' },
+];
+const REPORT_SECTIONS = ['Cover page and table of contents', 'Executive Summary', '1. PCE Information Summary', '2. VENs & Workloads',
+  '3. Label Summary', '4. Policy and Blocked Traffic by Scope', '5. Application Enforcement Status', '6. Assessment Summary',
+  '7. Consultant Recommendations'];
+
+function RowsEditor({ title, hint, columns, rows, addLabel, onChange }: {
+  title: string; hint: string; columns: RowColumn[]; rows: any[]; addLabel: string; onChange: (rows: any[]) => void;
+}) {
+  const edit = (i: number, key: string, value: string) => onChange(rows.map((r, n) => (n === i ? { ...r, [key]: value } : r)));
+  const blank = () => Object.fromEntries(columns.map(c => [c.key, '']));
+  return (
+    <div className="cr-block">
+      <div className="cr-head"><h3>{title}</h3><span className="hint">{hint}</span></div>
+      <table className="cr-table">
+        <thead><tr><th style={{ width: 34 }}>#</th>{columns.map(c => <th key={c.key} style={{ width: c.width }}>{c.label}</th>)}<th style={{ width: 38 }} /></tr></thead>
+        <tbody>
+          {rows.length === 0 && <tr><td colSpan={columns.length + 2} className="muted cr-none">Nothing entered yet. The Word document will show empty rows to fill in by hand.</td></tr>}
+          {rows.map((row, i) => (
+            <tr key={i}>
+              <td className="num muted">{i + 1}</td>
+              {columns.map(c => (
+                <td key={c.key}>
+                  {c.kind === 'select' ? (
+                    <select className="form-select form-select-sm" aria-label={c.label} value={row[c.key] || ''} onChange={(e: any) => edit(i, c.key, e.target.value)}>
+                      <option value="">—</option>
+                      {c.options!.map(o => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  ) : c.kind === 'long' ? (
+                    <textarea className="form-control form-control-sm" rows={2} maxLength={1000} aria-label={c.label} value={row[c.key] || ''}
+                      onChange={(e: any) => edit(i, c.key, e.target.value)} />
+                  ) : (
+                    <input type={c.kind === 'date' ? 'date' : 'text'} className="form-control form-control-sm" maxLength={200} aria-label={c.label}
+                      value={row[c.key] || ''} onChange={(e: any) => edit(i, c.key, e.target.value)} />
+                  )}
+                </td>
+              ))}
+              <td><button className="btn btn-light btn-sm" title="Remove this row" aria-label="Remove this row" onClick={() => onChange(rows.filter((_r, n) => n !== i))}><Icon name="bi-trash" /></button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <button className="btn btn-light btn-sm" onClick={() => onChange([...rows, blank()])}><Icon name="bi-plus-lg" /> {addLabel}</button>
+    </div>
+  );
+}
+
+function SummaryReport() {
+  const { data, toast } = useStore();
+  const [form, setForm] = useState(null as any);
+  const [state, setState] = useState('saved' as 'saved' | 'dirty' | 'saving' | 'error');
+  const [tl, setTl] = useState(null as TimelineData | null);
+  const [project, setProject] = useState('');
+  const latest = useRef(null as any);
+  const dirty = useRef(false);
+  const timer = useRef(0 as any);
+
+  useEffect(() => {
+    api('GET', '/api/reports/consultant').then(r => { latest.current = r; setForm(r); }).catch((e: any) => toast(e.message, 'err'));
+    api('GET', '/api/timeline').then(setTl).catch(() => {});
+    // Leaving the tab with edits still waiting to be saved: save them on the way out.
+    return () => { clearTimeout(timer.current); if (dirty.current) api('PUT', '/api/reports/consultant', latest.current).catch(() => {}); };
+  }, []);
+
+  const push = async () => {
+    if (!dirty.current) return true;
+    dirty.current = false;
+    setState('saving');
+    try {
+      await api('PUT', '/api/reports/consultant', latest.current);
+      if (!dirty.current) setState('saved');
+      return true;
+    } catch (e: any) {
+      dirty.current = true;
+      setState('error');
+      toast(e.message, 'err');
+      return false;
+    }
+  };
+  // Edits are saved automatically a moment after typing stops.
+  const change = (patch: any) => {
+    latest.current = { ...latest.current, ...patch };
+    setForm(latest.current);
+    dirty.current = true;
+    setState('dirty');
+    clearTimeout(timer.current);
+    timer.current = setTimeout(push, 1200);
+  };
+  const download = async () => {
+    clearTimeout(timer.current);
+    if (await push()) window.location.href = '/api/reports/enforcement-summary.docx' + (project ? `?projects=${project}` : '');
+  };
+
+  const status = { saved: 'All changes saved', dirty: 'Unsaved changes…', saving: 'Saving…', error: 'Not saved - check the connection' }[state];
+  return (
+    <>
+      <section className="report-banner">
+        <Logo />
+        <div className="brandname">illumio</div>
+        <div className="ttl">
+          <h2>Illumio Enforcement Summary Report</h2>
+          <div>The Word document for the customer, with the consultant's recommendations</div>
+        </div>
+        <div className="meta">Data as of: {fmtDateTime(data.settings.last_sync)}<br />PCE: {data.pce.name}</div>
+        <div className="pick">
+          <label htmlFor="word-project">Project</label>
+          <select id="word-project" className="form-select form-select-sm" value={project} onChange={(e: any) => setProject(e.target.value)}>
+            <option value="">All Projects</option>
+            {(tl ? tl.projects : []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </div>
+        <button className="btn btn-light" onClick={download} disabled={!form} title="Save the recommendations and download the report as a Word document">
+          <Icon name="bi-file-earmark-word" /> Download Word
+        </button>
+      </section>
+
+      <section className="card-x">
+        <div className="hd"><h2>What the document contains</h2><span className="hint">Built from the last sync; sync from the PCE first for current numbers</span></div>
+        <div className="bd"><ol className="cr-sections">{REPORT_SECTIONS.map(s => <li key={s}>{s}</li>)}</ol></div>
+      </section>
+
+      <section className="card-x">
+        <div className="hd">
+          <h2>Consultant Recommendations</h2>
+          <span className="hint">Printed in section 7 of the Word document. Anything left empty becomes a blank form to fill in by hand.</span>
+          <span className={`cr-state ms-auto ${state}`} role="status">{status}</span>
+        </div>
+        {!form ? <div className="boot" style={{ height: 160 }}><div className="spinner-border text-primary" role="status" /></div> : (
+          <div className="bd">
+            <div className="cr-block">
+              <div className="cr-head"><h3>Engagement Details</h3><span className="hint">Customer and Consultant also appear on the cover page</span></div>
+              <div className="cr-fields">
+                {ENGAGEMENT_FIELDS.map(f => (
+                  <div key={f.key}>
+                    <label htmlFor={`cr-${f.key}`}>{f.label}</label>
+                    <input id={`cr-${f.key}`} className="form-control form-control-sm" maxLength={200} placeholder={f.placeholder || ''}
+                      value={form[f.key] || ''} onChange={(e: any) => change({ [f.key]: e.target.value })} />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="cr-block">
+              <div className="cr-head"><h3>Executive Summary</h3><span className="hint">Overall state of the programme and the main message; shown in the Executive Summary at the front</span></div>
+              <textarea className="form-control" rows={4} maxLength={6000} aria-label="Executive summary" value={form.executive_summary || ''}
+                onChange={(e: any) => change({ executive_summary: e.target.value })} />
+            </div>
+            <RowsEditor title="Recommendations" hint="One row per recommendation" columns={RECOMMENDATION_COLS} rows={form.recommendations}
+              addLabel="Add recommendation" onChange={rows => change({ recommendations: rows })} />
+            <RowsEditor title="Risks and Dependencies" hint="What could delay enforcement, and how it is handled" columns={RISK_COLS} rows={form.risks}
+              addLabel="Add risk" onChange={rows => change({ risks: rows })} />
+            <RowsEditor title="Next Steps" hint="Agreed actions after this review" columns={NEXT_STEP_COLS} rows={form.next_steps}
+              addLabel="Add next step" onChange={rows => change({ next_steps: rows })} />
+            <div className="cr-block">
+              <div className="cr-head"><h3>Additional Notes</h3></div>
+              <textarea className="form-control" rows={3} maxLength={6000} aria-label="Additional notes" value={form.notes || ''}
+                onChange={(e: any) => change({ notes: e.target.value })} />
+            </div>
+          </div>
+        )}
+      </section>
+    </>
+  );
+}

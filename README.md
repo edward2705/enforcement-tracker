@@ -118,30 +118,39 @@ Tracker sheet; Completion by Environment, durations and progress bars follow the
 colours are conditional formatting; Status and Priority cells have dropdowns. Edits made in Excel
 are not written back to the tracker.
 
-**Download Word** (python-docx, charts drawn with matplotlib) gives an Illumio-themed landscape
-document in nine sections:
+**Reports → Enforcement Summary Report** is the Word document for the customer. The tab has the
+**Download Word** button and a **Consultant Recommendations** form: engagement details, executive
+summary, recommendations (area, observation, recommendation, priority, owner, target date, status),
+risks and dependencies, next steps and notes. The form saves by itself a moment after typing stops
+(`consultant_reports` table, one document per PCE) and is printed in the Word document; whatever is
+left empty becomes a blank form to fill in by hand.
 
-It opens with a cover page (PCE, project, dates, and Prepared for / Prepared by to fill in) and a
-table of contents. The contents are a Word field: Word asks to update fields when the document is
-opened, and answering Yes fills in the page numbers.
+The document (python-docx, charts drawn with matplotlib) is Illumio-themed and landscape. It opens
+with a cover page and a table of contents. The contents are a Word field: Word asks to update
+fields when the document is opened, and answering Yes fills in the page numbers. The cover shows
+`static/logo.png` when that file exists (put the official logo artwork there); otherwise it draws
+the tracker's own mark. Each section starts on a new page:
 
-1. **PCE Information Summary** - charts of workloads, VENs, labels, policy and blocked traffic, then
-   address, version, cluster health and last sync.
-2. **VEN Summary** - charts of enforcement modes, VEN versions and operating systems, VEN status
-   and VENs by application.
-3. **Workload Summary** - by application and by environment.
-4. **Label Summary** - labels by type and the full list, with unused labels highlighted. A label is
-   unused when no workload carries it and the PCE reports nothing else using it.
-5. **Policy and Blocked Traffic by Scope**, 6. **Application Enforcement Status** and 7. **Project Plan**.
-8. **Assessment Summary** - one finding per area (enforcement coverage, VEN connectivity and versions,
-   unmanaged workloads, labelling, unused labels, policy provisioning and coverage, blocked traffic,
-   tracker vs PCE, project plan) rated Action, Attention or Good with a recommendation. The ratings
-   are fixed rules in `assess()` in `reports.py`, not a manual review.
-9. **Consultant Recommendations** - an empty form on its own page for the consultant to complete in
-   Word: engagement details, executive summary, recommendations (area, observation, recommendation,
-   priority, owner, target date, status), risks and dependencies, next steps, notes and sign-off.
+- **Executive Summary** - headline numbers, applications by status, VENs by enforcement mode,
+  completion by environment, the consultant's summary and the key findings.
+- **1. PCE Information Summary** - charts of workloads, VENs, labels, policy and blocked traffic, then
+  address, version and cluster health.
+- **2. VENs & Workloads** - deployed VENs by type (server, endpoint, containerized), online, offline,
+  suspended, unmanaged workloads and enforcement modes as measure tables; charts of VENs by type,
+  VEN status by type, enforcement mode, VEN versions and operating systems; then one table by
+  application and one by environment.
+- **3. Label Summary** - labels by type and the full list, with unused labels highlighted. A label is
+  unused when no workload carries it and the PCE reports nothing else using it.
+- **4. Policy and Blocked Traffic by Scope** - rules and blocked traffic per scope, with the busiest scopes charted.
+- **5. Application Enforcement Status** - status, priority and completion charts, and one row per
+  application and environment with priority, status, % complete, dates and the latest comment.
+- **6. Assessment Summary** - one finding per area (enforcement coverage, VEN connectivity and versions,
+  unmanaged workloads, labelling, unused labels, policy provisioning and coverage, blocked traffic,
+  project status vs PCE, project plan) rated Action, Attention or Good with a recommendation. The
+  ratings are fixed rules in `assess()` in `reports.py`, not a manual review.
+- **7. Consultant Recommendations** - what was entered on the Reports tab, or the empty form, and a sign-off table.
 
-Sections 1 to 4 describe the whole PCE as of the last sync, including applications excluded from tracking.
+Sections 1 to 3 describe the whole PCE as of the last sync, including applications excluded from tracking.
 
 **Roll-ups & Exceptions** keeps the grouped summary, the overdue list and Tracker vs PCE.
 
@@ -207,6 +216,7 @@ erDiagram
     rule_sets { int id PK  int pce_id FK  text href "UK with pce_id"  text name  int rules_draft  int rules_active  int rules_pending }
     rule_set_scopes { int id PK  int rule_set_id FK  text scope  int application_id FK  int environment_id FK }
     labels { int id PK  int pce_id FK  text href "UK with pce_id"  text key  text value  int workload_count  text used_by }
+    consultant_reports { int id PK  int pce_id FK "UK"  text content "JSON"  datetime updated_at }
     traffic_summaries { int id PK  int pce_id FK  int application_id FK  int environment_id FK  int potentially_blocked_flows  int blocked_flows }
 
     pces ||--o{ projects : "has"

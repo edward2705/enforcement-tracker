@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS workloads (          -- snapshot of the PCE's workloa
     enforcement_mode  TEXT    NOT NULL DEFAULT '',
     ven_status        TEXT    NOT NULL DEFAULT '',
     ven_version       TEXT    NOT NULL DEFAULT '',
+    ven_type          TEXT    NOT NULL DEFAULT '',   -- server, endpoint, containerized
     policy_sync_state TEXT    NOT NULL DEFAULT '',
     last_heartbeat    TEXT,
     os                TEXT    NOT NULL DEFAULT '',
@@ -262,6 +263,12 @@ CREATE TABLE IF NOT EXISTS task_events (       -- change log
     created_at TEXT    NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS consultant_reports (  -- what the consultant writes for the Word report; one per PCE
+    id         INTEGER PRIMARY KEY,
+    pce_id     INTEGER NOT NULL UNIQUE REFERENCES pces(id) ON DELETE CASCADE,
+    content    TEXT    NOT NULL,   -- JSON: engagement details, executive summary, recommendations, risks, next steps, notes
+    updated_at TEXT    NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sync_runs (
     id                INTEGER PRIMARY KEY,
     pce_id            INTEGER NOT NULL REFERENCES pces(id) ON DELETE CASCADE,
@@ -338,6 +345,8 @@ def init():
     for col, ddl in (("priority_id", "INTEGER REFERENCES priorities(id) ON DELETE RESTRICT"), ("start_date", "TEXT"), ("end_date", "TEXT")):
         if col not in have:
             con.execute(f"ALTER TABLE application_environments ADD COLUMN {col} {ddl}")
+    if "ven_type" not in {r["name"] for r in con.execute("PRAGMA table_info(workloads)")}:
+        con.execute("ALTER TABLE workloads ADD COLUMN ven_type TEXT NOT NULL DEFAULT ''")
     if "application_environment_id" not in {r["name"] for r in con.execute("PRAGMA table_info(comments)")}:
         con.execute("ALTER TABLE comments ADD COLUMN application_environment_id INTEGER "
                     "REFERENCES application_environments(id) ON DELETE CASCADE")
