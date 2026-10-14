@@ -1612,8 +1612,6 @@ def build_docx(data, preview=False):
                     lambda ax: donut(ax, "VENs by Enforcement Mode", mode_parts, "VENs"),
                     lambda ax: hbars(ax, "Completion by Environment", completion, share=False, suffix="%", scale=100)],
               height=3.1, widths=[1, 1, 1.2])
-    if consultant["executive_summary"]:
-        callout(doc, "Consultant's Summary", consultant["executive_summary"].split("\n"), bullets=False)
     key = [f for f in findings if f[2] != "Good"]
     key.sort(key=lambda f: {"Critical": 0, "Action": 1}.get(f[2], 2))
     if key:
@@ -1838,7 +1836,7 @@ def build_docx(data, preview=False):
 # What the consultant fills in on Reports > Enforcement Summary Report. Kept as one JSON document per
 # PCE: it is free-form report text that is only ever read and written whole.
 CONSULTANT_FIELDS = ("customer", "consultant", "role_company", "customer_contact", "review_period", "next_review_date", "document_version")
-CONSULTANT_TEXTS = ("executive_summary", "notes")
+CONSULTANT_TEXTS = ("notes",)
 CONSULTANT_LISTS = {"recommendations": ("area", "observation", "recommendation", "priority", "owner", "target_date", "status"),
                     "risks": ("risk", "impact", "mitigation", "owner"),
                     "next_steps": ("action", "owner", "due_date", "notes")}

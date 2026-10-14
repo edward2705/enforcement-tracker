@@ -144,7 +144,7 @@ fields when the document is opened, and answering Yes fills in the page numbers.
 the tracker's own mark. The cover page is white with the logo and accents in Illumio orange and navy type (colours in `COVER` in `reports.py`). Each section starts on a new page:
 
 - **Executive Summary** - headline numbers, applications by status, VENs by enforcement mode,
-  completion by environment, the consultant's summary and the key findings.
+  completion by environment and the key findings.
 - **1. PCE Information Summary** - charts of workloads, VENs, labels, policy and blocked traffic, then
   address, version and cluster health.
 - **2. VENs & Workloads** - deployed VENs by type (server, endpoint, containerized), online, offline,

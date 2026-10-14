@@ -509,11 +509,6 @@ function SummaryReport() {
                 ))}
               </div>
             </div>
-            <div className="cr-block">
-              <div className="cr-head"><h3>Executive Summary</h3><span className="hint">Overall state of the programme and the main message; shown in the Executive Summary at the front</span></div>
-              <textarea className="form-control" rows={4} maxLength={6000} aria-label="Executive summary" value={form.executive_summary || ''}
-                onChange={(e: any) => change({ executive_summary: e.target.value })} />
-            </div>
             <RowsEditor title="Recommended Actions" hint="One row per recommendation" columns={RECOMMENDATION_COLS} rows={form.recommendations}
               addLabel="Add recommendation" onChange={rows => change({ recommendations: rows })} />
             <RowsEditor title="Risks and Dependencies" hint="What could delay enforcement, and how it is handled" columns={RISK_COLS} rows={form.risks}

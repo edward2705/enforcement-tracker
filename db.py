@@ -293,7 +293,7 @@ CREATE TABLE IF NOT EXISTS task_events (       -- change log
 CREATE TABLE IF NOT EXISTS consultant_reports (  -- what the consultant writes for the Word report; one per PCE
     id         INTEGER PRIMARY KEY,
     pce_id     INTEGER NOT NULL UNIQUE REFERENCES pces(id) ON DELETE CASCADE,
-    content    TEXT    NOT NULL,   -- JSON: engagement details, executive summary, recommendations, risks, next steps, notes
+    content    TEXT    NOT NULL,   -- JSON: engagement details, recommendations, risks, next steps, notes
     updated_at TEXT    NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sync_runs (
