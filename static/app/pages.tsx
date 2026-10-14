@@ -451,6 +451,8 @@ function PceModal({ pce, onClose }: { pce: PceConf | null; onClose: (saved: bool
 function SettingsPage() {
   const { data, run, reload, toast } = useStore();
   const [name, setName] = useState(data.settings.user_name);
+  const [days, setDays] = useState(String(data.settings.traffic_days));
+  const daysOk = /^\d+$/.test(days) && Number(days) >= 1 && Number(days) <= 365;
   const [pces, setPces] = useState([] as PceConf[]);
   const [editing, setEditing] = useState(undefined as undefined | null | PceConf);
   const [testing, setTesting] = useState('');
@@ -488,6 +490,17 @@ function SettingsPage() {
               <li>An application whose label was deleted in the PCE is kept and <b style={{ color: 'var(--danger)' }}>marked red</b>.</li>
               <li>The sync only reads from the PCE; it never writes to it.</li>
             </ul>
+            <div className="mt-3 pt-3" style={{ borderTop: '1px solid var(--line)' }}>
+              <label className="form-label" htmlFor="traffic-days">Traffic period (days)</label>
+              <div className="d-flex gap-2 align-items-center">
+                <input id="traffic-days" type="number" className={`form-control num${daysOk ? '' : ' is-invalid'}`} style={{ width: 110 }} min={1} max={365}
+                  step={1} value={days} onChange={(e: any) => setDays(e.target.value)} />
+                <button className="btn btn-primary" disabled={!daysOk || Number(days) === data.settings.traffic_days}
+                  onClick={() => run(() => api('PUT', '/api/settings', { traffic_days: Number(days) }), 'Traffic period saved - sync to apply it')}>Save</button>
+              </div>
+              <div className="form-text">How far back blocked and potentially blocked traffic is counted, from 1 to 365 days. It applies from the
+                next sync; the reports say which period their numbers cover. The PCE only returns what it still retains.</div>
+            </div>
           </div>
         </section>
       </div>

@@ -38,7 +38,7 @@ async job when a collection reaches the 500-item sync limit). It never changes l
 
 Blocked traffic is the one exception to `GET`: the PCE only answers traffic questions through an
 Explorer query, so each sync posts one to `/traffic_flows/async_queries` (blocked and potentially
-blocked flows of the last 30 days, `TRAFFIC_DAYS` in `policy.py`), downloads the result and deletes
+blocked flows of the traffic period: 30 days by default, changed under **Settings → Sync behaviour**), downloads the result and deletes
 the query again. If the API key may not read rulesets or traffic, the sync still completes, shows a
 warning and keeps the previous numbers.
 

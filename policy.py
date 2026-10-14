@@ -7,7 +7,8 @@ import requests
 import db
 import pce as pcelib
 
-TRAFFIC_DAYS = 30          # how far back blocked traffic is counted
+TRAFFIC_DAYS = 30          # how far back blocked traffic is counted, unless changed under Settings
+TRAFFIC_DAYS_RANGE = (1, 365)
 TRAFFIC_MAX_RESULTS = 100000
 DECISIONS = ("potentially_blocked", "blocked")
 TRAFFIC_COLS = ("potentially_blocked_flows", "potentially_blocked_connections", "blocked_flows", "blocked_connections")
@@ -35,6 +36,15 @@ def group_labels(groups):
         return out
 
     return {gid: (g.get("key"), g.get("name") or "", members(gid, set())) for gid, g in by_id.items()}
+
+
+def traffic_days(c):
+    """The traffic period for the next sync, in days: the "traffic_days" setting, or the default."""
+    try:
+        days = int(db.get_setting(c, "traffic_days", TRAFFIC_DAYS))
+    except ValueError:
+        return TRAFFIC_DAYS
+    return min(max(days, TRAFFIC_DAYS_RANGE[0]), TRAFFIC_DAYS_RANGE[1])
 
 
 def read_scope(entries, labels, groups):
@@ -93,7 +103,7 @@ def sync_rules(client, c, pid):
 def sync_traffic(client, c, pid):
     """Count blocked and potentially blocked flows for the whole PCE, per application and per
     application and environment. A flow counts for the scope of its source and of its destination."""
-    flows = client.traffic_flows(TRAFFIC_DAYS, DECISIONS, TRAFFIC_MAX_RESULTS)
+    flows = client.traffic_flows(traffic_days(c), DECISIONS, TRAFFIC_MAX_RESULTS)
     app_id = {r["label_href"]: r["id"] for r in c.execute("SELECT id, label_href FROM applications WHERE pce_id = ?", (pid,))}
     env_id = {r["label_href"]: r["id"] for r in c.execute("SELECT id, label_href FROM environments WHERE pce_id = ?", (pid,))}
 
@@ -172,6 +182,7 @@ def sync(client, c, pid, ts, workloads):
     is reported as a warning, so the rest of the sync still goes through. Each part asks the PCE first
     and commits on its own, so the database is not held locked while the traffic query runs."""
     info = json.loads(db.get_setting(c, f"policy_snapshot:{pid}", "{}"))
+    days = traffic_days(c)   # read once: the period recorded with the snapshot is the one that was queried
     warnings = []
     parts = (("rules", "rulesets", sync_rules), ("traffic", "blocked traffic", sync_traffic),
              ("labels", "labels", lambda *args: sync_labels(*args, workloads)), ("pce", "PCE details", sync_pce))
@@ -180,7 +191,7 @@ def sync(client, c, pid, ts, workloads):
             result = run(client, c, pid)
             info[part] = {"synced_at": ts, "error": ""}
             if part == "traffic":
-                info[part].update(days=TRAFFIC_DAYS, truncated=bool(result))
+                info[part].update(days=days, truncated=bool(result))
             elif part == "pce":
                 info[part].update(result)
         except (pcelib.PCEError, requests.RequestException, ValueError, KeyError) as err:

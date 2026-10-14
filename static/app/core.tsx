@@ -30,7 +30,7 @@ interface Activity { id: number; app_id?: number; app_name?: string; kind: strin
 interface Bootstrap {
   apps: App[]; hidden: App[]; people: Person[]; activity: Activity[];
   statuses: Status[]; priorities: Priority[]; pce_state_status: Record<string, Status>;
-  settings: { user_name: string; last_sync: string };
+  settings: { user_name: string; last_sync: string; traffic_days: number };
   pce: { name: string; fqdn: string; ui_base: string };
 }
 type ModalState =

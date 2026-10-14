@@ -339,6 +339,7 @@ def bootstrap():
         settings={
             "user_name": current_user(),
             "last_sync": last["completed_at"] if last else "",
+            "traffic_days": policy.traffic_days(c),
         },
         pce={
             "name": name,
@@ -864,6 +865,12 @@ def settings_update():
         if not name:
             raise ApiError("Display name is required")
         db.set_setting(c, "user_name", name)
+    if "traffic_days" in data:
+        low, high = policy.TRAFFIC_DAYS_RANGE
+        days = data["traffic_days"]
+        if isinstance(days, bool) or not isinstance(days, int) or not low <= days <= high:
+            raise ApiError(f"Traffic period must be a whole number of days between {low} and {high}")
+        db.set_setting(c, "traffic_days", days)
     c.commit()
     return jsonify(ok=True)
 
