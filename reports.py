@@ -975,13 +975,6 @@ def assess(data):
     else:
         add("Unmanaged workloads", "Every workload is managed by a VEN.", "Good", "No action needed.")
 
-    versions = sorted({w["ven_version"] for w in vens if w["ven_version"]}, key=version_key, reverse=True)
-    if len(versions) > 1:
-        behind = sum(1 for w in vens if w["ven_version"] != versions[0])
-        add("VEN versions", f"{len(versions):,} VEN versions are in use; {behind:,} VENs run a version older than {versions[0]}.", "Attention",
-            f"Plan an upgrade of the older VENs to {versions[0]} so every workload has the same features and fixes.")
-    elif versions:
-        add("VEN versions", f"All VENs run version {versions[0]}.", "Good", "No action needed.")
 
     unlabelled = sum(1 for w in workloads if not w["application"] or not w["environment"])
     if unlabelled:
@@ -1491,7 +1484,7 @@ PROTO_NAMES = {6: "TCP", 17: "UDP"}
 
 
 def selective_ports(doc, data):
-    """Section 7: the risky ports to put under Selective Enforcement. The core remote-access ports are
+    """Section 6: the risky ports to put under Selective Enforcement. The core remote-access ports are
     always listed; other risky ports are listed when the last sync found traffic on them. The suggestion
     comes from whether a boundary on the port would block anything (potentially blocked connections)."""
     doc.add_heading("Suggested Selective Enforcement Ports", level=2)
@@ -1560,7 +1553,7 @@ ATTENTION_PORTS = (
 
 
 def attention_ports(doc, data):
-    """Section 7: services that are on by default but rarely needed, and how to deal with them."""
+    """Section 6: services that are on by default but rarely needed, and how to deal with them."""
     doc.add_heading("Services and Ports That Need Attention", level=2)
     note(doc, "These services are often running without anyone needing them. They add noise to the traffic data and to "
               "rule writing, and they widen the attack surface. Deal with them at the source rather than with allow rules.")
@@ -1783,34 +1776,8 @@ def build_docx(data, preview=False):
     for text in policy_notes(pol, with_traffic=False):
         note(doc, text)
 
-    # ---- 5. Applications
-    doc.add_heading("5. Application Enforcement Status", level=1)
-    lead(doc, "Where each application and environment stands on its way from visibility to full enforcement.")
-    total = len(active)
-    tiles = [("Applications", total), ("Environments", sum(1 for _a, e in scopes if e))]
-    for s_ in ("Fully Enforced", "Selective Enforcement", "In Progress", "Not Started"):
-        tiles.append((s_, f"{with_status(s_):,}   {(with_status(s_) / total if total else 0):.0%}"))
-    doc_tiles(doc, tiles)
-    doc_chart(doc, [lambda ax: donut(ax, "Applications by Status", status_parts, "applications"),
-                    lambda ax: hbars(ax, "Applications by Priority", [(p_, sum(1 for a in active if a["priority"] == p_)) for p_ in PRIORITIES],
-                                     [PRIORITY_COLOR[p_] for p_ in PRIORITIES]),
-                    lambda ax: hbars(ax, "Completion by Environment", completion, share=False, suffix="%", scale=100)],
-              height=3.1, widths=[1, 1.2, 1.2])
-    rows = []
-    for a, e in scopes:
-        src = e or a
-        rows.append([a["name"], e["name"] if e else "—", src["priority"], src["status"], f"{src['progress']}%", progress_bar(src["progress"]),
-                     fmt_date(src["start_date"] or a["start_date"]), fmt_date(src["end_date"] or a["end_date"]),
-                     (src["comments"] if e and src["comments"] else a["comments"]) or ""])   # the latest comment
-    if rows:
-        doc_table(doc, ["Application", "Environment", "Priority", "Status", "% Complete", "Progress", "Start", "End", "Comments"],
-                  rows, [1.8, 0.95, 0.75, 1.35, 0.7, 1.15, 0.9, 0.9, 2.4], right=(4,), colors={5: ORANGE}, size=8.5,
-                  badges={2: {p_: (PRIORITY_TINT[p_], PRIORITY_COLOR[p_]) for p_ in PRIORITIES}, 3: status_badges})
-    else:
-        doc.add_paragraph("No applications are being tracked yet.")
-
-    # ---- 6. Assessment
-    doc.add_heading("6. Assessment Summary", level=1)
+    # ---- 5. Assessment
+    doc.add_heading("5. Assessment Summary", level=1)
     lead(doc, "An automated health check of the deployment: one finding per area, with a rating and a suggested next step.")
     count = lambda rating: sum(1 for f in findings if f[2] == rating)  # noqa: E731
     doc_tiles(doc, [("Areas Assessed", len(findings)), ("Critical", count("Critical"), "#B02A2A" if count("Critical") else ORANGE),
@@ -1823,8 +1790,8 @@ def build_docx(data, preview=False):
               "Action: something is not working or is overdue. "
               "Attention: work still to do. Good: nothing outstanding.")
 
-    # ---- 7. Recommendations: what the consultant entered on the Reports page, or an empty form
-    doc.add_heading("7. Recommendations", level=1)
+    # ---- 6. Recommendations: what the consultant entered on the Reports page, or an empty form
+    doc.add_heading("6. Recommendations", level=1)
     entered = any(consultant[k] for k in CONSULTANT_TEXTS) or any(consultant[k] for k in CONSULTANT_LISTS)
     if entered:
         lead(doc, "Observations and recommendations from the consultant's review of this deployment.")

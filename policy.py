@@ -85,10 +85,15 @@ def read_scope(entries, labels, groups):
 
 
 def sync_rules(client, c, pid):
+    client.status("Reading labels")
     labels = {l["href"]: (l.get("key"), l.get("value")) for l in client.collection("/labels")}
+    client.status("Reading label groups")
     groups = group_labels(client.collection("/sec_policy/draft/label_groups") + client.collection("/sec_policy/active/label_groups"))
+    client.status("Reading draft rulesets")
     draft = {object_id(r["href"]): r for r in client.collection("/sec_policy/draft/rule_sets")}
+    client.status("Reading provisioned rulesets")
     active = {object_id(r["href"]): r for r in client.collection("/sec_policy/active/rule_sets")}
+    client.status(f"Saving {len(set(draft) | set(active)):,} rulesets")
     app_id = {r["label_href"]: r["id"] for r in c.execute("SELECT id, label_href FROM applications WHERE pce_id = ?", (pid,))}
     env_id = {r["label_href"]: r["id"] for r in c.execute("SELECT id, label_href FROM environments WHERE pce_id = ?", (pid,))}
     rules = lambda rs: (rs.get("rules") or []) + (rs.get("deny_rules") or [])  # noqa: E731
@@ -235,7 +240,33 @@ def sync_pce(client, _c, _pid):
     return out
 
 
-def sync(client, c, pid, ts, workloads):
+class NoProgress:
+    def start(self, key, detail=""): pass
+    def done(self, key, count=None, detail="", warning=False): pass
+    def fail(self, key, message): pass
+
+
+def part_result(c, pid, part, info):
+    """(count, detail) for the sync progress once a part is stored."""
+    if part == "rules":
+        r = c.execute("SELECT COUNT(*) n, COALESCE(SUM(rules_draft), 0) d, COALESCE(SUM(rules_active), 0) a "
+                      "FROM rule_sets WHERE pce_id = ?", (pid,)).fetchone()
+        return r["n"], f"{r['n']:,} rulesets · {r['a']:,} rules provisioned, {r['d']:,} in draft"
+    if part == "traffic":
+        r = c.execute("SELECT COALESCE(SUM(connections), 0) n, COALESCE(SUM(flows), 0) f FROM traffic_ports WHERE pce_id = ?",
+                      (pid,)).fetchone()
+        t = info.get("traffic") or {}
+        return r["n"], (f"{r['n']:,} blocked or potentially blocked connections, {r['f']:,} flows · last {t.get('days')} days"
+                        + (" · result truncated" if t.get("truncated") else "") + ("" if t.get("draft") else " · no draft decisions"))
+    if part == "labels":
+        n = c.execute("SELECT COUNT(*) FROM labels WHERE pce_id = ?", (pid,)).fetchone()[0]
+        return n, f"{n:,} labels with usage"
+    p = info.get("pce") or {}
+    return None, " · ".join(x for x in (p.get("version") and f"Version {p['version']}", p.get("status") and f"health {p['status']}",
+                                        p.get("nodes") and f"{p['nodes']} node{'s' if p['nodes'] != 1 else ''}") if x)
+
+
+def sync(client, c, pid, ts, workloads, progress=None):
     """Refresh the snapshots. Traffic is cleared first, every time: the stored counts are only ever the
     ones this sync read, so a traffic query that fails leaves no traffic rather than old numbers. Any
     other part the PCE refuses or cannot answer keeps its previous snapshot. Failures are reported as
@@ -249,9 +280,11 @@ def sync(client, c, pid, ts, workloads):
     info["traffic"] = {"cleared_at": ts}
     db.set_setting(c, f"policy_snapshot:{pid}", json.dumps(info))
     c.commit()
+    progress = progress or NoProgress()
     parts = (("rules", "rulesets", sync_rules), ("traffic", "blocked traffic", sync_traffic),
              ("labels", "labels", lambda *args: sync_labels(*args, workloads)), ("pce", "PCE details", sync_pce))
     for part, label, run in parts:
+        progress.start(part)
         try:
             result = run(client, c, pid)
             info[part] = {"synced_at": ts, "error": ""}
@@ -263,6 +296,8 @@ def sync(client, c, pid, ts, workloads):
                     warnings.append(f"Could not read draft policy decisions: {draft_error}. Counts by provisioned rules are up to date.")
             elif part == "pce":
                 info[part].update(result)
+            count, detail = part_result(c, pid, part, info)
+            progress.done(part, count, detail, warning=bool(part == "traffic" and info[part].get("draft_error")))
         except (pcelib.PCEError, requests.RequestException, ValueError, KeyError) as err:
             c.rollback()
             message = str(err) if isinstance(err, pcelib.PCEError) else f"PCE request failed ({type(err).__name__})"
@@ -270,6 +305,7 @@ def sync(client, c, pid, ts, workloads):
             if part == "traffic":
                 message += "; traffic was cleared and shows no counts until the next sync reads it"
             warnings.append(f"Could not read {label}: {message}")
+            progress.fail(part, message)
         db.set_setting(c, f"policy_snapshot:{pid}", json.dumps(info))
         c.commit()
     return warnings

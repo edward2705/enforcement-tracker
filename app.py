@@ -3,10 +3,12 @@ import csv
 import datetime
 import getpass
 import io
+import json
 import os
 import socket
 import sys
 import threading
+import time
 
 import requests
 from flask import Flask, Response, g, jsonify, request, send_from_directory
@@ -356,15 +358,105 @@ def empty_counts():
     return {col: 0 for col in WL_COLS}
 
 
+class SyncProgress:
+    """What the running (or last) sync is doing, one step per kind of Illumio object, for the progress
+    panel to poll. One sync at a time: a second Sync from PCE is refused while one runs."""
+
+    STEPS = (("app_labels", "Application labels"), ("env_labels", "Environment labels"), ("workloads", "Workloads"),
+             ("tracker", "Applications & environments"), ("rules", "Rulesets & rules"),
+             ("traffic", "Blocked traffic (Explorer query)"), ("labels", "All labels & usage"), ("pce", "PCE version & health"))
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.state = {"running": False, "steps": []}
+
+    def begin(self, pce):
+        with self.lock:
+            if self.state["running"]:
+                return False
+            self.state = {"running": True, "pce": pce, "started_at": now(), "finished_at": None, "error": "", "current": None,
+                          "steps": [{"key": k, "label": l, "status": "pending", "count": None, "detail": "", "started": None,
+                                     "seconds": None} for k, l in self.STEPS]}
+            return True
+
+    def _step(self, key):
+        return next(s for s in self.state["steps"] if s["key"] == key)
+
+    def start(self, key, detail=""):
+        with self.lock:
+            step = self._step(key)
+            step.update(status="running", detail=detail, started=time.time())
+            self.state["current"] = key
+
+    def note(self, detail):
+        """Live detail for the running step (the PCE client reports what it is waiting for)."""
+        with self.lock:
+            if self.state.get("current"):
+                self._step(self.state["current"])["detail"] = detail
+
+    def done(self, key, count=None, detail="", warning=False):
+        with self.lock:
+            step = self._step(key)
+            step.update(status="warning" if warning else "done", count=count, detail=detail,
+                        seconds=round(time.time() - (step["started"] or time.time()), 1))
+
+    def fail(self, key, message):
+        with self.lock:
+            step = self._step(key)
+            step.update(status="error", detail=message, seconds=round(time.time() - (step["started"] or time.time()), 1))
+
+    def finish(self, error=""):
+        with self.lock:
+            for step in self.state["steps"]:
+                if step["status"] == "running":
+                    step.update(status="error", detail=error or step["detail"])
+                elif step["status"] == "pending" and error:
+                    step.update(status="skipped", detail="Not run: the sync stopped")
+            self.state.update(running=False, finished_at=now(), error=error, current=None)
+
+    def snapshot(self):
+        with self.lock:
+            return json.loads(json.dumps(self.state))
+
+
+SYNC = SyncProgress()
+
+
+@app.get("/api/sync/progress")
+def sync_progress():
+    return jsonify(SYNC.snapshot())
+
+
 @app.post("/api/sync")
 def sync():
     cfg, name = active_pce_name()
     if not name:
         raise ApiError("No PCE is configured - add one in Settings")
+    if not SYNC.begin(name):
+        raise ApiError("A sync is already running", 409)
+    try:
+        result = run_sync(cfg, name)
+    except Exception as err:
+        SYNC.finish(str(err) if isinstance(err, (ApiError, pcelib.PCEError)) else f"Sync failed ({type(err).__name__})")
+        raise
+    SYNC.finish()
+    return result
+
+
+def run_sync(cfg, name):
     client = pcelib.PCE(name, cfg[name])
+    client.on_status = SYNC.note
+    SYNC.start("app_labels")
     app_labels = client.collection("/labels", {"key": "app"})
+    SYNC.done("app_labels", len(app_labels), f"{len(app_labels):,} application labels")
+    SYNC.start("env_labels")
     env_labels = client.collection("/labels", {"key": "env"})
+    SYNC.done("env_labels", len(env_labels), f"{len(env_labels):,} environment labels")
+    SYNC.start("workloads")
     workloads = client.collection("/workloads")
+    managed = sum(1 for w in workloads if w.get("managed") and not w.get("deleted"))
+    SYNC.done("workloads", len(workloads), f"{len(workloads):,} workloads · {managed:,} with a VEN, {len(workloads) - managed:,} unmanaged")
+    SYNC.start("tracker", "Updating applications, environments and the workload snapshot")
 
     app_counts, env_counts = {}, {}
     for wl in workloads:
@@ -518,8 +610,10 @@ def sync():
     for _app in c.execute("SELECT id FROM applications WHERE pce_id = ?", (pid,)).fetchall():
         recalc_app_dates(_app["id"])
     c.commit()
+    SYNC.done("tracker", stats["applications"], f"{stats['applications']:,} applications, {stats['environments']:,} environment pairs"
+              + (f" · {stats['added']:,} new" if stats["added"] else "") + (f" · {stats['deleted']:,} deleted in PCE" if stats["deleted"] else ""))
     # Rulesets and blocked traffic per scope, for the reports.
-    stats["warnings"] = policy.sync(client, c, pid, ts, workloads)
+    stats["warnings"] = policy.sync(client, c, pid, ts, workloads, SYNC)
     return jsonify(ok=True, last_sync=ts, **stats)
 
 

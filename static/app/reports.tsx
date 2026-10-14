@@ -360,8 +360,8 @@ const ENGAGEMENT_FIELDS: { key: string; label: string; placeholder?: string }[] 
   { key: 'document_version', label: 'Document version', placeholder: 'e.g. 1.0' },
 ];
 const REPORT_SECTIONS = ['Cover page and table of contents', 'Executive Summary', '1. PCE Information Summary', '2. VENs & Workloads (with unsupported VENs and workloads missing labels)',
-  '3. Label Summary', '4. Policy and Blocked Traffic by Scope', '5. Application Enforcement Status', '6. Assessment Summary',
-  '7. Recommendations (with risky ports suggested for Selective Enforcement and services that need attention)'];
+  '3. Label Summary', '4. Policy and Blocked Traffic by Scope', '5. Assessment Summary',
+  '6. Recommendations (with risky ports suggested for Selective Enforcement and services that need attention)'];
 
 function RowsEditor({ title, hint, columns, rows, addLabel, onChange }: {
   title: string; hint: string; columns: RowColumn[]; rows: any[]; addLabel: string; onChange: (rows: any[]) => void;
@@ -492,7 +492,7 @@ function SummaryReport() {
       <section className="card-x">
         <div className="hd">
           <h2>Recommendations</h2>
-          <span className="hint">Filled in by the consultant and printed in section 7 of the Word document. Anything left empty becomes a blank form to fill in by hand.</span>
+          <span className="hint">Filled in by the consultant and printed in section 6 of the Word document. Anything left empty becomes a blank form to fill in by hand.</span>
           <span className={`cr-state ms-auto ${state}`} role="status">{status}</span>
         </div>
         {!form ? <div className="boot" style={{ height: 160 }}><div className="spinner-border text-primary" role="status" /></div> : (

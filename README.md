@@ -17,7 +17,9 @@ python3 app.py            # http://127.0.0.1:5055 and http://<hostname>:5055  (P
 Run `source .venv/bin/activate` again in each new shell before starting the app; without it
 `python3 app.py` fails with `ModuleNotFoundError: No module named 'flask'`.
 
-Open the app and press **Sync from PCE**. The PCE connection is read from `config.yaml`
+Open the app and press **Sync from PCE**. A progress panel shows each kind of Illumio object as it is read
+(application and environment labels, workloads, rulesets and rules, the blocked-traffic query, all labels, PCE
+version and health) with its count, what the PCE is doing and how long it took; `GET /api/sync/progress` returns the same. The PCE connection is read from `config.yaml`
 and can be edited under **Settings → PCE Configuration**.
 
 ## Stack
@@ -160,13 +162,11 @@ the tracker's own mark. The cover page is white with the logo and accents in Ill
   they are on the Reports tab and in the Excel workbook. Each scope has a **Scope Type**: scopeless rulesets (no scope, so
   they apply to every workload) and rulesets scoped to an application only (every environment of it) are highlighted,
   named in a callout above the table, and application-only scopes get a row of their own.
-- **5. Application Enforcement Status** - status, priority and completion charts, and one row per
-  application and environment with priority, status, % complete, dates and the latest comment.
-- **6. Assessment Summary** - one finding per area (enforcement coverage, VEN connectivity and versions,
+- **5. Assessment Summary** - one finding per area (enforcement coverage, VEN connectivity,
   unmanaged workloads, labelling, unused labels, policy provisioning and coverage,
   project status vs PCE, project plan, VEN type) rated Critical, Action, Attention or Good with a recommendation. The
   ratings are fixed rules in `assess()` in `reports.py`, not a manual review.
-- **7. Recommendations** - what the consultant entered on the Reports tab, or the empty form, and a sign-off table.
+- **6. Recommendations** - what the consultant entered on the Reports tab, or the empty form, and a sign-off table.
   It also has **Suggested Selective Enforcement Ports**: the high-risk ports usually closed first with an
   enforcement boundary (RDP, SMB, MS-RPC, WinRM, NetBIOS, SSH, VNC, Telnet, FTP; the list is `SELECTIVE_PORTS` in
   `reports.py`), always listed as **Core**, plus other risky ports the last sync **found in traffic** (blocked or

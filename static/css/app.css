@@ -735,3 +735,32 @@ body.no-scroll { overflow: hidden; }
 /* No header or footer on the cover, as in Word. */
 .word-viewer-pages .docx-wrapper > section.docx:first-of-type > header,
 .word-viewer-pages .docx-wrapper > section.docx:first-of-type > footer { visibility: hidden; }
+
+/* Sync progress panel: one row per kind of Illumio object */
+.sync-panel { position: fixed; top: 76px; right: 20px; z-index: 2500; width: 420px; max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 100px); overflow-y: auto; background: var(--surface); border: 1px solid var(--line);
+  border-top: 3px solid var(--accent); border-radius: 12px; box-shadow: var(--shadow-lg); padding: 14px 16px; animation: pop .14s; }
+.sync-panel.ok { border-top-color: var(--st-fe); } .sync-panel.warn { border-top-color: var(--st-ip); } .sync-panel.err { border-top-color: var(--danger); }
+.sp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.sp-title { font-weight: 700; color: var(--ink); }
+.sp-sub { font-size: 12px; color: var(--ink-3); }
+.sp-bar { height: 8px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--line); margin: 10px 0 8px; overflow: hidden; }
+.sp-fill { height: 100%; background: var(--accent); border-radius: 99px; transition: width .4s ease; }
+.sync-panel.ok .sp-fill { background: var(--st-fe); } .sync-panel.warn .sp-fill { background: var(--st-ip); } .sync-panel.err .sp-fill { background: var(--danger); }
+.sp-fill.live { background-image: linear-gradient(45deg, rgba(255,255,255,.25) 25%, transparent 25%, transparent 50%, rgba(255,255,255,.25) 50%, rgba(255,255,255,.25) 75%, transparent 75%);
+  background-size: 16px 16px; animation: sp-stripes 1s linear infinite; }
+@keyframes sp-stripes { to { background-position: 16px 0; } }
+.sp-error { font-size: 13px; color: var(--danger); background: var(--danger-bg); border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; }
+.sp-steps { list-style: none; margin: 0; padding: 0; }
+.sp-step { display: grid; grid-template-columns: 20px 1fr auto; gap: 8px; align-items: start; padding: 7px 0; border-top: 1px solid var(--line); }
+.sp-step:first-child { border-top: 0; }
+.sp-step > i { margin-top: 2px; color: var(--ink-3); }
+.sp-step.running > i { color: var(--accent); } .sp-step.done > i { color: var(--st-fe); }
+.sp-step.warning > i { color: var(--st-ip); } .sp-step.error > i { color: var(--danger); }
+.sp-step.pending .sp-label, .sp-step.skipped .sp-label { color: var(--ink-3); }
+.sp-label { display: flex; justify-content: space-between; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.sp-count { font-variant-numeric: tabular-nums; font-weight: 700; }
+.sp-detail { font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
+.sp-step.error .sp-detail { color: var(--danger); }
+.sp-time { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; min-width: 32px; text-align: right; }
+@media (prefers-reduced-motion: reduce) { .sp-fill.live { animation: none; } .sp-fill { transition: none; } }

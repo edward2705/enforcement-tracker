@@ -165,11 +165,16 @@ class PCE:
         self.session = ReadOnlySession(f"{self.fqdn}:{self.port}", self.org)
         self.session.auth = (str(conf.get("api_key") or ""), str(conf.get("api_secret") or ""))
         self.session.headers["Accept"] = "application/json"
+        self.on_status = None   # optional callback(text): what the client is waiting for, for the sync progress
         cert = conf.get("cert_path")
         if cert:
             if not os.path.exists(cert):
                 raise PCEError(f"cert_path not found: {cert}")
             self.session.verify = cert
+
+    def status(self, text):
+        if self.on_status:
+            self.on_status(text)
 
     @property
     def ui_base(self):
@@ -206,10 +211,13 @@ class PCE:
             return resp.json()
         deadline = time.time() + max_wait
         wait = float(resp.headers.get("Retry-After") or 1)
+        started = time.time()
         while True:
             time.sleep(min(max(wait, 0.5), 5))
             status = self._check(self.session.get(self.root + job, timeout=30)).json()
+            self.status(f"PCE is preparing a large result ({status.get('status') or 'pending'}, {time.time() - started:.0f}s)")
             if status.get("status") == "done":
+                self.status("Downloading the result")
                 return self._check(
                     self.session.get(self.root + status["result"]["href"], timeout=120)
                 ).json()
@@ -238,17 +246,20 @@ class PCE:
             "end_date": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "policy_decisions": list(decisions), "max_results": max_results,
         }
+        self.status(f"Submitting the Explorer query ({days} days)")
         job = self._check(self.session.post(self.base + "/traffic_flows/async_queries", json=body, timeout=30)).json()["href"]
         self.session.own_queries.add(urlsplit(self.root + job).path)   # the only query this client may update or delete
         try:
-            self._wait_query(job, max_wait, lambda q: True)
+            self._wait_query(job, max_wait, lambda q: True, "PCE is running the query")
             draft_error = ""
             if draft:
                 try:
                     self._check(self.session.put(self.root + job + "/update_rules", json={}, timeout=30))
-                    self._wait_query(job, max_wait, lambda q: query_rules_status(q) == "completed")
+                    self._wait_query(job, max_wait, lambda q: query_rules_status(q) == "completed",
+                                     "PCE is checking the flows against draft policy")
                 except (PCEError, requests.RequestException) as err:
                     draft_error = str(err) if isinstance(err, PCEError) else f"PCE request failed ({type(err).__name__})"
+            self.status("Downloading the flows")
             flows = self._check(self.session.get(self.root + job + "/download", timeout=180)).json()
             if draft and not draft_error and flows and not any("draft_policy_decision" in f for f in flows):
                 draft_error = "the PCE returned no draft policy decisions"
@@ -259,11 +270,15 @@ class PCE:
             except requests.RequestException:
                 pass
 
-    def _wait_query(self, job, max_wait, ready):
-        deadline = time.time() + max_wait
+    def _wait_query(self, job, max_wait, ready, doing="PCE is running the query"):
+        started = time.time()
+        deadline = started + max_wait
         while True:
             query = self._check(self.session.get(self.root + job, timeout=30)).json()
             status = query.get("status")
+            matches = query.get("matches_count") or query.get("flows_count")
+            self.status(f"{doing} ({status or 'queued'}" + (f", {matches:,} matches" if isinstance(matches, int) else "")
+                        + f", {time.time() - started:.0f}s)")
             if status == "completed" and ready(query):
                 return query
             if status in ("failed", "cancelled", "killed") or query_rules_status(query) == "failed":
