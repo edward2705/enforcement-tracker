@@ -145,6 +145,52 @@ CREATE TABLE IF NOT EXISTS workloads (          -- snapshot of the PCE's workloa
 CREATE INDEX IF NOT EXISTS idx_workloads_application ON workloads(application_id);
 CREATE INDEX IF NOT EXISTS idx_workloads_environment ON workloads(environment_id);
 
+-- Policy and traffic snapshots, replaced on every sync ------------------------
+CREATE TABLE IF NOT EXISTS rule_sets (
+    id            INTEGER PRIMARY KEY,
+    pce_id        INTEGER NOT NULL REFERENCES pces(id) ON DELETE CASCADE,
+    href          TEXT    NOT NULL,              -- without the draft/active part, so both versions share it
+    name          TEXT    NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    rules_draft   INTEGER NOT NULL DEFAULT 0 CHECK (rules_draft >= 0),    -- rules in the draft policy
+    rules_active  INTEGER NOT NULL DEFAULT 0 CHECK (rules_active >= 0),   -- rules in the provisioned policy
+    rules_pending INTEGER NOT NULL DEFAULT 0 CHECK (rules_pending >= 0),  -- draft changes not provisioned yet
+    UNIQUE (pce_id, href)
+);
+CREATE TABLE IF NOT EXISTS rule_set_scopes (    -- one row per application and environment a ruleset scope covers
+    id             INTEGER PRIMARY KEY,
+    rule_set_id    INTEGER NOT NULL REFERENCES rule_sets(id)    ON DELETE CASCADE,
+    scope          TEXT    NOT NULL,                                        -- the scope as written in the PCE
+    application_id INTEGER REFERENCES applications(id) ON DELETE CASCADE,  -- NULL: the scope names no tracked application
+    environment_id INTEGER REFERENCES environments(id) ON DELETE CASCADE   -- NULL: every environment
+);
+CREATE TABLE IF NOT EXISTS traffic_summaries (  -- blocked and potentially blocked flows seen by the PCE
+    id                              INTEGER PRIMARY KEY,
+    pce_id                          INTEGER NOT NULL REFERENCES pces(id) ON DELETE CASCADE,
+    application_id                  INTEGER REFERENCES applications(id) ON DELETE CASCADE,  -- NULL: the whole PCE
+    environment_id                  INTEGER REFERENCES environments(id) ON DELETE CASCADE,  -- NULL: the whole application
+    potentially_blocked_flows       INTEGER NOT NULL DEFAULT 0 CHECK (potentially_blocked_flows >= 0),
+    potentially_blocked_connections INTEGER NOT NULL DEFAULT 0 CHECK (potentially_blocked_connections >= 0),
+    blocked_flows                   INTEGER NOT NULL DEFAULT 0 CHECK (blocked_flows >= 0),
+    blocked_connections             INTEGER NOT NULL DEFAULT 0 CHECK (blocked_connections >= 0)
+);
+CREATE TABLE IF NOT EXISTS labels (             -- every label in the PCE and where it is used
+    id             INTEGER PRIMARY KEY,
+    pce_id         INTEGER NOT NULL REFERENCES pces(id) ON DELETE CASCADE,
+    href           TEXT    NOT NULL,
+    key            TEXT    NOT NULL,              -- label type: app, env, loc, role, ...
+    value          TEXT    NOT NULL,
+    workload_count INTEGER NOT NULL DEFAULT 0 CHECK (workload_count >= 0),
+    used_by        TEXT    NOT NULL DEFAULT '',   -- what the PCE says uses it, comma-separated; empty: unused
+    UNIQUE (pce_id, href)
+);
+CREATE INDEX IF NOT EXISTS idx_rule_set_scopes_rule_set    ON rule_set_scopes(rule_set_id);
+CREATE INDEX IF NOT EXISTS idx_rule_set_scopes_application ON rule_set_scopes(application_id);
+CREATE INDEX IF NOT EXISTS idx_rule_set_scopes_environment ON rule_set_scopes(environment_id);
+CREATE INDEX IF NOT EXISTS idx_traffic_summaries_pce         ON traffic_summaries(pce_id);
+CREATE INDEX IF NOT EXISTS idx_traffic_summaries_application ON traffic_summaries(application_id);
+CREATE INDEX IF NOT EXISTS idx_traffic_summaries_environment ON traffic_summaries(environment_id);
+
 -- Project timeline ----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS task_statuses (
     id         INTEGER PRIMARY KEY,

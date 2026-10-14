@@ -24,7 +24,7 @@ and can be edited under **Settings → PCE Configuration**.
 
 | Layer | Choice |
 |---|---|
-| API | Flask (`app.py`, `timeline.py`, `pce.py`), SQLite (`db.py`; `tracker.db` is created on first run) |
+| API | Flask (`app.py`, `timeline.py`, `policy.py`, `pce.py`), SQLite (`db.py`; `tracker.db` is created on first run) |
 | UI | React 18 + TypeScript + Bootstrap 5, in `static/app/*.tsx` |
 | Build | None. No Node.js: Babel (vendored in `static/vendor`) compiles the TSX in the browser. Types are stripped, not type-checked. |
 
@@ -32,8 +32,15 @@ All front-end libraries are vendored, so the app works without internet access.
 
 ## How the PCE is used
 
-The tracker only issues `GET` requests: `/labels?key=app`, `/labels?key=env` and `/workloads`
-(switching to an async job when a collection reaches the 500-item sync limit). It never writes to the PCE.
+The tracker reads `/labels` (with usage), `/label_dimensions`, `/workloads`, `/product_version`, `/health`, and the draft and provisioned (`active`) versions of
+`/sec_policy/.../rule_sets` and `/sec_policy/.../label_groups` with `GET` requests (switching to an
+async job when a collection reaches the 500-item sync limit). It never changes labels, workloads or policy.
+
+Blocked traffic is the one exception to `GET`: the PCE only answers traffic questions through an
+Explorer query, so each sync posts one to `/traffic_flows/async_queries` (blocked and potentially
+blocked flows of the last 30 days, `TRAFFIC_DAYS` in `policy.py`), downloads the result and deletes
+the query again. If the API key may not read rulesets or traffic, the sync still completes, shows a
+warning and keeps the previous numbers.
 
 Managed workloads are grouped by app label (and app + env label) and summarised:
 
@@ -94,17 +101,40 @@ A project is a tree of tasks shown as a grid next to a Gantt chart.
 
 **Reports → Illumio Enforcement Summary** is a one-page report: KPIs, applications by status and
 priority, a per-phase overview of the project plan, and the task table with its Gantt chart.
-**Download Excel** (`reports.py`, built with XlsxWriter) produces a workbook with five sheets:
+**Download Excel** (`reports.py`, built with XlsxWriter) produces a workbook with six sheets:
 
 - **Dashboard** - banner, six tinted tiles, three native Excel charts (Applications by Status,
   Applications by Priority, Completion by Environment) and one row per application and environment
   with priority, people, dates, duration, % complete, an in-cell progress bar, status and comments.
+- **Policy & Traffic** - one row per scope (application and environment, as on the Dashboard): the
+  rulesets scoped to it, their rules in the draft policy, rules provisioned, draft changes not yet
+  provisioned, and potentially blocked and blocked flows and connections. Rulesets whose scope names
+  no tracked application (for example All Applications) follow with their own scope, and a last row
+  totals the whole PCE.
 - **Application Tracker**, **People**, **Environments** and **Project Timeline** - the underlying data.
 
 The workbook is live: tiles and the status and priority charts are formulas over the Application
 Tracker sheet; Completion by Environment, durations and progress bars follow the Dashboard table;
 colours are conditional formatting; Status and Priority cells have dropdowns. Edits made in Excel
 are not written back to the tracker.
+
+**Download Word** (python-docx, charts drawn with matplotlib) gives an Illumio-themed landscape
+document in eight sections:
+
+1. **PCE Information Summary** - charts of workloads, VENs, labels, policy and blocked traffic, then
+   address, version, cluster health and last sync.
+2. **VEN Summary** - charts of enforcement modes, VEN versions and operating systems, VEN status
+   and VENs by application.
+3. **Workload Summary** - by application and by environment.
+4. **Label Summary** - labels by type and the full list, with unused labels highlighted. A label is
+   unused when no workload carries it and the PCE reports nothing else using it.
+5. **Policy and Blocked Traffic by Scope**, 6. **Application Enforcement Status** and 7. **Project Plan**.
+8. **Assessment Summary** - one finding per area (enforcement coverage, VEN connectivity and versions,
+   unmanaged workloads, labelling, unused labels, policy provisioning and coverage, blocked traffic,
+   tracker vs PCE, project plan) rated Action, Attention or Good with a recommendation. The ratings
+   are fixed rules in `assess()` in `reports.py`, not a manual review.
+
+Sections 1 to 4 describe the whole PCE as of the last sync, including applications excluded from tracking.
 
 **Roll-ups & Exceptions** keeps the grouped summary, the overdue list and Tracker vs PCE.
 
@@ -167,6 +197,10 @@ erDiagram
     comments { int id PK  int application_id FK  int author_id FK  text body  datetime created_at }
     events { int id PK  int application_id FK  int author_id FK  text kind  text message  datetime created_at }
     sync_runs { int id PK  int pce_id FK  datetime completed_at  int application_count }
+    rule_sets { int id PK  int pce_id FK  text href "UK with pce_id"  text name  int rules_draft  int rules_active  int rules_pending }
+    rule_set_scopes { int id PK  int rule_set_id FK  text scope  int application_id FK  int environment_id FK }
+    labels { int id PK  int pce_id FK  text href "UK with pce_id"  text key  text value  int workload_count  text used_by }
+    traffic_summaries { int id PK  int pce_id FK  int application_id FK  int environment_id FK  int potentially_blocked_flows  int blocked_flows }
 
     pces ||--o{ projects : "has"
     projects ||--o{ tasks : "contains"

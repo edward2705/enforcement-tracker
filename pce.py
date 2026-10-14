@@ -1,4 +1,5 @@
 """Illumio PCE connection settings (config.yaml) and a small read-only REST client."""
+import datetime
 import os
 import re
 import tempfile
@@ -81,6 +82,10 @@ class PCE:
     def get(self, path, params=None, timeout=30):
         return self._check(self.session.get(self.base + path, params=params, timeout=timeout))
 
+    def root_get(self, path, timeout=30):
+        """GET a resource that is not under the org, such as /product_version or /health."""
+        return self._check(self.session.get(self.root + path, timeout=timeout))
+
     def collection(self, path, params=None):
         """Return a full collection, switching to an async job past the sync cap."""
         data = self.get(path, params).json()
@@ -109,3 +114,36 @@ class PCE:
                 raise PCEError(f"PCE async job failed for {path}")
             if time.time() > deadline:
                 raise PCEError(f"Timed out waiting for the PCE async job for {path}")
+
+    def traffic_flows(self, days, decisions, max_results=100000, max_wait=180):
+        """Flows with the given policy decisions over the last `days` days, from an Explorer async query.
+
+        This is the one request that is not a GET: the PCE only answers traffic questions through a
+        query it runs in the background. The query is deleted again once its result is downloaded."""
+        end = datetime.datetime.now(datetime.timezone.utc)
+        body = {
+            "query_name": "enforcement-tracker blocked traffic",
+            "sources": {"include": [], "exclude": []}, "destinations": {"include": [], "exclude": []},
+            "services": {"include": [], "exclude": []}, "sources_destinations_query_op": "and",
+            "start_date": (end - datetime.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end_date": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "policy_decisions": list(decisions), "max_results": max_results,
+        }
+        job = self._check(self.session.post(self.base + "/traffic_flows/async_queries", json=body, timeout=30)).json()["href"]
+        try:
+            deadline = time.time() + max_wait
+            while True:
+                status = self._check(self.session.get(self.root + job, timeout=30)).json().get("status")
+                if status == "completed":
+                    break
+                if status in ("failed", "cancelled", "killed"):
+                    raise PCEError(f"PCE traffic query {status}")
+                if time.time() > deadline:
+                    raise PCEError("Timed out waiting for the PCE traffic query")
+                time.sleep(2)
+            return self._check(self.session.get(self.root + job + "/download", timeout=180)).json()
+        finally:
+            try:
+                self.session.delete(self.root + job, timeout=30)
+            except requests.RequestException:
+                pass

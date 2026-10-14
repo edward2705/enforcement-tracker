@@ -78,6 +78,7 @@ function Root() {
       toast(`Synced ${r.applications} applications, ${r.environments} environment pairs and ${r.workloads} workloads` +
         (r.added ? ` · ${r.added} new` : '') + (r.deleted ? ` · ${r.deleted} application(s) deleted in PCE` : '') +
         (r.deleted_environments ? ` · ${r.deleted_environments} environment(s) deleted in PCE` : ''));
+      (r.warnings || []).forEach((w: string) => toast(w, 'err'));
     } catch (e: any) { toast(e.message, 'err'); }
     setSyncing(false);
   };

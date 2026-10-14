@@ -14,6 +14,7 @@ from werkzeug.serving import make_server
 
 import db
 import pce as pcelib
+import policy
 
 STATUSES = [name for name, _pct in db.STATUSES]
 PRIORITIES = db.PRIORITIES
@@ -512,6 +513,8 @@ def sync():
     for _app in c.execute("SELECT id FROM applications WHERE pce_id = ?", (pid,)).fetchall():
         recalc_app_dates(_app["id"])
     c.commit()
+    # Rulesets and blocked traffic per scope, for the reports.
+    stats["warnings"] = policy.sync(client, c, pid, ts, workloads)
     return jsonify(ok=True, last_sync=ts, **stats)
 
 

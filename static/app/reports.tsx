@@ -166,6 +166,9 @@ function EnforcementSummary() {
             {(tl ? tl.projects : []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
         </div>
+        <a className="btn btn-light no-print" href={excelUrl.replace('.xlsx', '.docx')} title="Download this report as a Word document">
+          <Icon name="bi-file-earmark-word" /> Download Word
+        </a>
         <a className="btn btn-light no-print" href={excelUrl} title="Download this report as an Excel workbook">
           <Icon name="bi-file-earmark-excel" /> Download Excel
         </a>
