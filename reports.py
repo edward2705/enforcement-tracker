@@ -1764,14 +1764,13 @@ def build_docx(data, preview=False):
     scope_callout(doc, pol)
     # Rules only here; the traffic counts are on the Reports tab and in the Excel workbook.
     counts = RULE_COUNTS
-    rows = [[r["scope"], policy.SCOPE_TYPES.get(r.get("scope_type"), ""), r["status"], r["pce_state"]] + [r[k] for k in counts]
+    rows = [[r["scope"], policy.SCOPE_TYPES.get(r.get("scope_type"), ""), r["pce_state"]] + [r[k] for k in counts]
             for r in pol["rows"]]
-    rows.append(["PCE total", "", "", ""] + [t[k] for k in counts])
-    status_badges = {s_: (STATUS_TINT[s_], STATUS_TEXT[s_]) for s_ in APP_STATUSES}
-    doc_table(doc, ["Scope", "Scope Type", "Project Status", "PCE Enforcement", "Rulesets", "Rules in Draft", "Rules Provisioned",
+    rows.append(["PCE total", "", ""] + [t[k] for k in counts])
+    doc_table(doc, ["Scope", "Scope Type", "PCE Enforcement", "Rulesets", "Rules in Draft", "Rules Provisioned",
                     "Draft Not Provisioned"],
-              rows, [3.0, 1.3, 1.45, 1.45, 0.75, 0.75, 0.9, 0.9], right=range(4, 8), bold_rows={len(rows) - 1},
-              badges={1: SCOPE_BADGES, 2: status_badges},
+              rows, [3.4, 1.4, 1.6, 0.85, 0.85, 1.0, 1.0], right=range(3, 7), bold_rows={len(rows) - 1},
+              badges={1: SCOPE_BADGES},
               tints={n: SCOPE_TINT[r.get("scope_type")] for n, r in enumerate(pol["rows"]) if r.get("scope_type") in SCOPE_TINT})
     for text in policy_notes(pol, with_traffic=False):
         note(doc, text)
