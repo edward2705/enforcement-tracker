@@ -1534,7 +1534,7 @@ def selective_ports(doc, data):
             clear.append(service)
             rows.append([label, service, PORT_PURPOSE.get(service, ""), why, seen_any, "Review first",
                          "Confirm with the application owners that nothing needs this port, then add it to the enforcement "
-                         "boundary: the last sync found no connection on it that would be blocked."])
+                         "boundary: no connection on it would be blocked."])
         else:
             needs_rules.append(service)
             rows.append([label, service, PORT_PURPOSE.get(service, ""), why, seen_any, "Review first",
@@ -1543,9 +1543,9 @@ def selective_ports(doc, data):
     note(doc, "Selective Enforcement blocks only the ports in an enforcement boundary and leaves the rest of the traffic in "
               "visibility, so these risky ports can be closed before full enforcement. Traffic that an allow rule permits "
               "keeps flowing. The first rows are the remote-access and lateral-movement ports usually closed first; the "
-              "others are risky ports (data stores, management planes, legacy services) that the last sync found in this "
-              "PCE's traffic. Seen means the last sync found traffic on the port"
-              + (f" in the {traffic.get('days', policy.TRAFFIC_DAYS)} days before it" if synced else "")
+              "others are risky ports (data stores, management planes, legacy services) found in this "
+              "PCE's traffic. Seen means traffic was found on the port"
+              + (f" in the last {traffic.get('days', policy.TRAFFIC_DAYS)} days" if synced else "")
               + ". Review every port before adding it to the boundary.")
     if synced:
         extra = len(listed) - len(SELECTIVE_PORTS)
