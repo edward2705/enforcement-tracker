@@ -1643,7 +1643,7 @@ def build_docx(data, preview=False):
               "workload, label and policy detail behind each finding, and section 6 lists the ports to close with "
               "Selective Enforcement.")
     doc_tiles(doc, [("Applications", len(active)), ("Fully Enforced", with_status("Fully Enforced"), "#146C36"), ("VENs", len(vens)),
-                    ("VENs in Full Enforcement", share(in_mode("full"), len(vens))), ("Blocked Flows", t["blocked_flows"])])
+                    ("VENs in Full Enforcement", share(in_mode("full"), len(vens)))])
     doc_chart(doc, [lambda ax: donut(ax, "Applications by Status", status_parts, "applications"),
                     lambda ax: donut(ax, "VENs by Enforcement Mode", mode_parts, "VENs"),
                     lambda ax: hbars(ax, "Completion by Environment", completion, share=False, suffix="%", scale=100)],
