@@ -171,7 +171,7 @@ the tracker's own mark. The cover page is white with the logo and accents in Ill
   next steps, notes) under a name, per PCE, in `consultant_report_saves`; **Retrieve** puts a saved copy back in the
   form (and so in the report), **Update** overwrites it with the form, and saving under an existing name replaces it.
   It also has **Suggested Selective Enforcement Ports**: the high-risk ports usually closed first with an
-  enforcement boundary (RDP, SMB, MS-RPC, WinRM, NetBIOS, SSH, VNC, Telnet, FTP; the list is `SELECTIVE_PORTS` in
+  enforcement boundary (RDP, SMB, MS-RPC, WinRM, NetBIOS, SSH, VNC, Telnet, FTP, PostgreSQL; the list is `SELECTIVE_PORTS` in
   `reports.py`), always listed, plus other risky ports the last sync found in traffic (blocked or
   potentially blocked): databases, Redis, MongoDB, Elasticsearch, Docker, Kubernetes, LDAP, SNMP, TFTP, LLMNR, rsh
   and more; the list is `RISKY_PORTS`. Each row has a short description of what the service does (`PORT_PURPOSE`),

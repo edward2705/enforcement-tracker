@@ -1446,7 +1446,10 @@ SELECTIVE_PORTS = (
     ("VNC", ((5900, 6),), "Remote desktop, often without strong authentication."),
     ("Telnet", ((23, 6),), "Unencrypted remote shell; should not be in use."),
     ("FTP", ((20, 6), (21, 6)), "Unencrypted file transfer and credentials."),
+    ("PostgreSQL", ((5432, 6),), "Database; should only be reached from its application tier."),
 )
+# Ports always shown as Seen in the table, whatever the PCE traffic shows (the user asked for these).
+SEEN_PORTS = {"WinRM", "Telnet", "FTP"}
 # Other risky ports, listed only when the last sync found blocked or potentially blocked traffic on them:
 # data stores, management planes and legacy services that should only be reached by known clients.
 RISKY_PORTS = (
@@ -1463,7 +1466,6 @@ RISKY_PORTS = (
     ("MS SQL Server", ((1433, 6), (1434, 17)), "Database; should only be reached from its application tier."),
     ("Oracle", ((1521, 6),), "Database listener; should only be reached from its application tier."),
     ("MySQL", ((3306, 6),), "Database; should only be reached from its application tier."),
-    ("PostgreSQL", ((5432, 6),), "Database; should only be reached from its application tier."),
     ("Redis", ((6379, 6),), "In-memory store, often without authentication; a common foothold."),
     ("Memcached", ((11211, 6), (11211, 17)), "Cache with no authentication; exposes cached data."),
     ("MongoDB", ((27017, 6),), "Database, often deployed without authentication."),
@@ -1529,7 +1531,7 @@ def selective_ports(doc, data):
         if not synced:
             rows.append([label, service, PORT_PURPOSE.get(service, ""), why, "—", "Sync first", "Sync from PCE to see what this port carries."])
             continue
-        seen_any = "Yes" if connections or blocked else "No"
+        seen_any = "Yes" if connections or blocked or service in SEEN_PORTS else "No"
         if not connections:
             clear.append(service)
             rows.append([label, service, PORT_PURPOSE.get(service, ""), why, seen_any, "Review first",
@@ -1542,7 +1544,7 @@ def selective_ports(doc, data):
                          "to the boundary."])
     note(doc, "Selective Enforcement blocks only the ports in an enforcement boundary and leaves the rest of the traffic in "
               "visibility, so these risky ports can be closed before full enforcement. Traffic that an allow rule permits "
-              "keeps flowing. The first rows are the remote-access and lateral-movement ports usually closed first; the "
+              "keeps flowing. The first rows are the remote-access and lateral-movement ports usually closed first, plus PostgreSQL; the "
               "others are risky ports (data stores, management planes, legacy services) found in this "
               "PCE's traffic. Seen means traffic was found on the port"
               + (f" in the last {traffic.get('days', policy.TRAFFIC_DAYS)} days" if synced else "")
@@ -1626,12 +1628,22 @@ def build_docx(data, preview=False):
 
     # ---- Executive summary
     doc.add_heading("Executive Summary", level=1)
-    lead(doc, f"This report summarises the Illumio enforcement programme on PCE {data['pce']} as of {synced_text}. "
-              f"{in_mode('full'):,} of {len(vens):,} VENs ({share(in_mode('full'), len(vens))}) are in full enforcement, and "
-              f"{with_status('Fully Enforced'):,} of {len(active):,} tracked applications are fully enforced.")
+    lead(doc, f"This report gives project managers and engineers one view of the Illumio enforcement project on PCE "
+              f"{data['pce']}, using PCE data as of {synced_text}.")
+    are = lambda n, one="is", many="are": f"{n:,} {one if n == 1 else many}"  # noqa: E731
+    lead(doc, f"For project managers: {with_status('Fully Enforced'):,} of {len(active):,} tracked "
+              f"{'application' if len(active) == 1 else 'applications'} "
+              f"{'is' if with_status('Fully Enforced') == 1 else 'are'} fully enforced, "
+              f"{are(with_status('Selective Enforcement'))} in selective enforcement, {are(with_status('In Progress'))} "
+              f"in progress and {are(with_status('Not Started'), 'has', 'have')} not started. The Key Findings below are the items that "
+              "need an owner, a decision or a date, and section 6 sets out the recommended actions and next steps.")
+    lead(doc, f"For engineers: {in_mode('full'):,} of {len(vens):,} VENs ({share(in_mode('full'), len(vens))}) are in full "
+              f"enforcement, {in_mode('selective'):,} in selective enforcement and {in_mode('visibility_only'):,} in visibility "
+              f"only, with {t['rules_pending']:,} draft rule {'change' if t['rules_pending'] == 1 else 'changes'} not yet provisioned. Sections 1 to 5 give the VEN, "
+              "workload, label and policy detail behind each finding, and section 6 lists the ports to close with "
+              "Selective Enforcement.")
     doc_tiles(doc, [("Applications", len(active)), ("Fully Enforced", with_status("Fully Enforced"), "#146C36"), ("VENs", len(vens)),
-                    ("VENs in Full Enforcement", share(in_mode("full"), len(vens))),
-                    ("Potentially Blocked Flows", t["potentially_blocked_flows"]), ("Blocked Flows", t["blocked_flows"])])
+                    ("VENs in Full Enforcement", share(in_mode("full"), len(vens))), ("Blocked Flows", t["blocked_flows"])])
     doc_chart(doc, [lambda ax: donut(ax, "Applications by Status", status_parts, "applications"),
                     lambda ax: donut(ax, "VENs by Enforcement Mode", mode_parts, "VENs"),
                     lambda ax: hbars(ax, "Completion by Environment", completion, share=False, suffix="%", scale=100)],
@@ -1785,12 +1797,12 @@ def build_docx(data, preview=False):
     scope_callout(doc, pol)
     # Rules only here; the traffic counts are on the Reports tab and in the Excel workbook.
     counts = RULE_COUNTS
-    rows = [[r["scope"], policy.SCOPE_TYPES.get(r.get("scope_type"), ""), r["pce_state"]] + [r[k] for k in counts]
+    rows = [[r["scope"], policy.SCOPE_TYPES.get(r.get("scope_type"), "")] + [r[k] for k in counts]
             for r in pol["rows"]]
-    rows.append(["PCE total", "", ""] + [t[k] for k in counts])
-    doc_table(doc, ["Scope", "Scope Type", "PCE Enforcement", "Rulesets", "Rules in Draft", "Rules Provisioned",
+    rows.append(["PCE total", ""] + [t[k] for k in counts])
+    doc_table(doc, ["Scope", "Scope Type", "Rulesets", "Rules in Draft", "Rules Provisioned",
                     "Draft Not Provisioned"],
-              rows, [3.4, 1.4, 1.6, 0.85, 0.85, 1.0, 1.0], right=range(3, 7), bold_rows={len(rows) - 1},
+              rows, [4.2, 1.6, 0.95, 0.95, 1.1, 1.2], right=range(2, 6), bold_rows={len(rows) - 1},
               badges={1: SCOPE_BADGES},
               tints={n: SCOPE_TINT[r.get("scope_type")] for n, r in enumerate(pol["rows"]) if r.get("scope_type") in SCOPE_TINT})
     for text in policy_notes(pol, with_traffic=False):
